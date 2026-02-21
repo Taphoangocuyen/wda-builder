@@ -126,10 +126,19 @@ jobs:
           }
           EOF
 
+          # Find XCTest framework path
+          XCODE_PATH=$(xcode-select -p)
+          XCTEST_FW_PATH="${XCODE_PATH}/Platforms/iPhoneOS.platform/Developer/Library/Frameworks"
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          echo "XCTest framework path: $XCTEST_FW_PATH"
+          ls -la "$XCTEST_FW_PATH/XCTest.framework" || echo "XCTest not at expected path"
+
           # Compile the dylib
-          clang -shared -framework Foundation -framework XCTest \
+          clang -shared -framework Foundation \
+            -F"$XCTEST_FW_PATH" -framework XCTest \
             -arch arm64 \
-            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -isysroot "$IOS_SDK" \
             -target arm64-apple-ios14.0 \
             -o WDAAutoStart.dylib \
             WDAAutoStart.m
