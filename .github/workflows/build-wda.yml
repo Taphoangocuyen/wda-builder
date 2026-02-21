@@ -1,0 +1,212 @@
+name: Build WebDriverAgent IPA (TrollStore)
+
+on:
+  workflow_dispatch:
+    inputs:
+      display_name:
+        description: 'Tên hiển thị trên iPhone'
+        required: false
+        default: 'iPhone-Control'
+      bundle_id_prefix:
+        description: 'Bundle ID prefix'
+        required: false
+        default: 'com.facebook'
+      min_ios:
+        description: 'iOS tối thiểu'
+        required: false
+        default: '15.0'
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔍 Kiểm tra Xcode
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep iphoneos
+
+      # ====== INSTALL LDID ======
+      - name: 🔧 Cài ldid (TrollStore signing)
+        run: |
+          brew install ldid
+          ldid -h 2>&1 | head -3 || true
+          echo "✅ ldid installed"
+
+      # ====== CLONE WDA ======
+      - name: 📦 Clone WebDriverAgent
+        run: |
+          git clone --depth 1 https://github.com/appium/WebDriverAgent.git
+          echo "✅ Done"
+
+      # ====== CUSTOMIZE ======
+      - name: 🎨 Tuỳ chỉnh WDA
+        env:
+          DISPLAY_NAME: ${{ github.event.inputs.display_name || 'iPhone-Control' }}
+          BUNDLE_PREFIX: ${{ github.event.inputs.bundle_id_prefix || 'com.facebook' }}
+          MIN_IOS: ${{ github.event.inputs.min_ios || '15.0' }}
+        run: |
+          chmod +x scripts/customize_wda.sh
+          bash scripts/customize_wda.sh
+
+      # ====== ADD ICON ======
+      - name: 🖼️ Thêm icon
+        run: |
+          if [ -f "resources/icon.png" ]; then
+            cp resources/icon.png WebDriverAgent/icon.png
+            PLIST="WebDriverAgent/WebDriverAgentRunner/Info.plist"
+            /usr/libexec/PlistBuddy -c "Delete :CFBundleIconFiles" "$PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIconFiles array" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIconFiles:0 string icon.png" "$PLIST"
+            echo "✅ Icon added"
+          fi
+
+      # ====== DISABLE CODE SIGNING ======
+      - name: 🔓 Tắt Code Signing
+        run: |
+          cd WebDriverAgent
+          find . -name "*.pbxproj" -exec sed -i '' \
+            -e 's/CODE_SIGN_IDENTITY = ".*"/CODE_SIGN_IDENTITY = ""/g' \
+            -e 's/DEVELOPMENT_TEAM = ".*"/DEVELOPMENT_TEAM = ""/g' \
+            -e 's/PROVISIONING_PROFILE_SPECIFIER = ".*"/PROVISIONING_PROFILE_SPECIFIER = ""/g' \
+            -e 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' \
+            {} +
+          echo "✅ Done"
+
+      # ====== BUILD WDA ======
+      - name: 🔨 Build WDA
+        run: |
+          cd WebDriverAgent
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath ./build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ARCHS="arm64" \
+            IPHONEOS_DEPLOYMENT_TARGET="${{ github.event.inputs.min_ios || '15.0' }}" \
+            ENABLE_BITCODE=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            2>&1 | tail -20
+          echo "✅ Build succeeded!"
+
+      # ====== SIGN WITH LDID FOR TROLLSTORE ======
+      - name: 🔏 Ký bằng ldid (TrollStore compatible)
+        run: |
+          cd WebDriverAgent
+          
+          APP_PATH=$(find ./build/Build/Products -name "*.app" -type d | grep "Runner" | head -1)
+          
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ .app not found!"
+            exit 1
+          fi
+          
+          echo "📍 App: $APP_PATH"
+          echo ""
+          
+          ENTITLEMENTS="../resources/entitlements.plist"
+          
+          # Sign tất cả frameworks
+          echo "🔏 Signing frameworks..."
+          find "$APP_PATH/Frameworks" -type f -perm +111 ! -name "*.plist" ! -name "*.yml" | while read binary; do
+            echo "  Signing: $(basename $(dirname $binary))/$(basename $binary)"
+            ldid -S"$ENTITLEMENTS" "$binary" 2>/dev/null || ldid -S "$binary" 2>/dev/null || true
+          done
+          
+          # Sign dylibs in Frameworks
+          find "$APP_PATH/Frameworks" -name "*.dylib" | while read dylib; do
+            echo "  Signing dylib: $(basename $dylib)"
+            ldid -S"$ENTITLEMENTS" "$dylib" 2>/dev/null || true
+          done
+          
+          # Sign xctest plugin
+          echo ""
+          echo "🔏 Signing plugins..."
+          XCTEST_PATH="$APP_PATH/PlugIns/WebDriverAgentRunner.xctest"
+          if [ -d "$XCTEST_PATH" ]; then
+            # Sign WebDriverAgentLib framework
+            WDALIB="$XCTEST_PATH/Frameworks/WebDriverAgentLib.framework/WebDriverAgentLib"
+            if [ -f "$WDALIB" ]; then
+              echo "  Signing: WebDriverAgentLib"
+              ldid -S"$ENTITLEMENTS" "$WDALIB"
+            fi
+            
+            # Sign xctest binary
+            XCTEST_BIN="$XCTEST_PATH/WebDriverAgentRunner"
+            if [ -f "$XCTEST_BIN" ]; then
+              echo "  Signing: WebDriverAgentRunner (xctest)"
+              ldid -S"$ENTITLEMENTS" "$XCTEST_BIN"
+            fi
+          fi
+          
+          # Sign main binary LAST
+          echo ""
+          echo "🔏 Signing main binary..."
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+          ldid -S"$ENTITLEMENTS" "$APP_PATH/$BINARY_NAME"
+          echo "  ✅ Signed: $BINARY_NAME"
+          
+          # Verify entitlements
+          echo ""
+          echo "🔍 Verify entitlements:"
+          ldid -e "$APP_PATH/$BINARY_NAME" 2>/dev/null | head -20
+          
+          echo ""
+          echo "✅ All binaries signed for TrollStore!"
+
+      # ====== PACKAGE IPA ======
+      - name: 📦 Đóng gói IPA
+        env:
+          DISPLAY_NAME: ${{ github.event.inputs.display_name || 'iPhone-Control' }}
+        run: |
+          cd WebDriverAgent
+          
+          APP_PATH=$(find ./build/Build/Products -name "*.app" -type d | grep "Runner" | head -1)
+          
+          # Copy icon
+          if [ -f "icon.png" ]; then
+            cp icon.png "$APP_PATH/icon.png"
+          fi
+          
+          # Create IPA
+          mkdir -p ipa_output/Payload
+          cp -r "$APP_PATH" ipa_output/Payload/
+          
+          cd ipa_output
+          IPA_NAME=$(echo "$DISPLAY_NAME" | tr ' ' '_' | tr '-' '_')
+          zip -r "../${IPA_NAME}.ipa" Payload/
+          cd ..
+          
+          echo "✅ IPA: ${IPA_NAME}.ipa ($(du -h "${IPA_NAME}.ipa" | cut -f1))"
+
+      # ====== UPLOAD ======
+      - name: 📤 Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: WDA-IPA-TrollStore
+          path: WebDriverAgent/*.ipa
+          retention-days: 90
+
+      - name: 📋 Kết quả
+        env:
+          DISPLAY_NAME: ${{ github.event.inputs.display_name || 'iPhone-Control' }}
+          BUNDLE_PREFIX: ${{ github.event.inputs.bundle_id_prefix || 'com.facebook' }}
+        run: |
+          echo "=========================================="
+          echo "   ✅ BUILD HOÀN TẤT (TrollStore)!"
+          echo "=========================================="
+          echo "📱 Tên: $DISPLAY_NAME"
+          echo "🆔 Bundle ID: ${BUNDLE_PREFIX}.WebDriverAgentRunner.xctrunner"
+          echo "🔏 Signed: ldid (TrollStore compatible)"
+          echo "📲 Cài: Gửi IPA lên iPhone → Mở bằng TrollStore"
+          echo ""
+          echo "⚠️  KHÔNG dùng Sideloadly — cài trực tiếp qua TrollStore!"
+          echo "=========================================="
