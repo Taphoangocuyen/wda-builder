@@ -1,212 +1,310 @@
-name: Build WebDriverAgent IPA (TrollStore)
+name: Build WDA for TrollStore
 
 on:
   workflow_dispatch:
     inputs:
+      bundle_id:
+        description: 'Bundle ID for WDA'
+        required: false
+        default: 'com.custom.WebDriverAgent'
       display_name:
-        description: 'Tên hiển thị trên iPhone'
+        description: 'App display name'
         required: false
-        default: 'iPhone-Control'
-      bundle_id_prefix:
-        description: 'Bundle ID prefix'
+        default: 'WDA Agent'
+      include_autostart:
+        description: 'Include auto-start dylib (launch XCTest on app open)'
         required: false
-        default: 'com.facebook'
-      min_ios:
-        description: 'iOS tối thiểu'
-        required: false
-        default: '15.0'
+        type: boolean
+        default: true
 
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 30
-
     steps:
-      - name: 📥 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🔍 Kiểm tra Xcode
+      - name: Clone WebDriverAgent source
         run: |
-          xcodebuild -version
-          xcodebuild -showsdks | grep iphoneos
+          git clone https://github.com/appium/WebDriverAgent.git
+          cd WebDriverAgent
+          echo "WDA version: $(git describe --tags --always)"
 
-      # ====== INSTALL LDID ======
-      - name: 🔧 Cài ldid (TrollStore signing)
-        run: |
-          brew install ldid
-          ldid -h 2>&1 | head -3 || true
-          echo "✅ ldid installed"
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
 
-      # ====== CLONE WDA ======
-      - name: 📦 Clone WebDriverAgent
-        run: |
-          git clone --depth 1 https://github.com/appium/WebDriverAgent.git
-          echo "✅ Done"
-
-      # ====== CUSTOMIZE ======
-      - name: 🎨 Tuỳ chỉnh WDA
-        env:
-          DISPLAY_NAME: ${{ github.event.inputs.display_name || 'iPhone-Control' }}
-          BUNDLE_PREFIX: ${{ github.event.inputs.bundle_id_prefix || 'com.facebook' }}
-          MIN_IOS: ${{ github.event.inputs.min_ios || '15.0' }}
-        run: |
-          chmod +x scripts/customize_wda.sh
-          bash scripts/customize_wda.sh
-
-      # ====== ADD ICON ======
-      - name: 🖼️ Thêm icon
-        run: |
-          if [ -f "resources/icon.png" ]; then
-            cp resources/icon.png WebDriverAgent/icon.png
-            PLIST="WebDriverAgent/WebDriverAgentRunner/Info.plist"
-            /usr/libexec/PlistBuddy -c "Delete :CFBundleIconFiles" "$PLIST" 2>/dev/null || true
-            /usr/libexec/PlistBuddy -c "Add :CFBundleIconFiles array" "$PLIST"
-            /usr/libexec/PlistBuddy -c "Add :CFBundleIconFiles:0 string icon.png" "$PLIST"
-            echo "✅ Icon added"
-          fi
-
-      # ====== DISABLE CODE SIGNING ======
-      - name: 🔓 Tắt Code Signing
+      - name: Build WebDriverAgent for iOS (arm64)
         run: |
           cd WebDriverAgent
-          find . -name "*.pbxproj" -exec sed -i '' \
-            -e 's/CODE_SIGN_IDENTITY = ".*"/CODE_SIGN_IDENTITY = ""/g' \
-            -e 's/DEVELOPMENT_TEAM = ".*"/DEVELOPMENT_TEAM = ""/g' \
-            -e 's/PROVISIONING_PROFILE_SPECIFIER = ".*"/PROVISIONING_PROFILE_SPECIFIER = ""/g' \
-            -e 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' \
-            {} +
-          echo "✅ Done"
 
-      # ====== BUILD WDA ======
-      - name: 🔨 Build WDA
-        run: |
-          cd WebDriverAgent
+          # Build WDA for generic iOS device (arm64)
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -configuration Release \
-            -derivedDataPath ./build \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            ARCHS="arm64" \
-            IPHONEOS_DEPLOYMENT_TARGET="${{ github.event.inputs.min_ios || '15.0' }}" \
-            ENABLE_BITCODE=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            2>&1 | tail -20
-          echo "✅ Build succeeded!"
+            PRODUCT_BUNDLE_IDENTIFIER="${{ github.event.inputs.bundle_id }}" \
+            DEVELOPMENT_TEAM="" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            | tee build.log
 
-      # ====== SIGN WITH LDID FOR TROLLSTORE ======
-      - name: 🔏 Ký bằng ldid (TrollStore compatible)
+          echo "=== Build completed ==="
+
+      - name: Create auto-start dylib
+        if: ${{ github.event.inputs.include_autostart == 'true' }}
         run: |
-          cd WebDriverAgent
-          
-          APP_PATH=$(find ./build/Build/Products -name "*.app" -type d | grep "Runner" | head -1)
-          
+          # Create WDAAutoStart dylib that programmatically launches XCTest when app opens
+          cat > WDAAutoStart.m << 'EOF'
+          #import <Foundation/Foundation.h>
+          #import <objc/runtime.h>
+
+          // Forward declaration
+          @interface XCTestConfiguration : NSObject
+          @property (copy) NSString *productModuleName;
+          @property (copy) NSString *testBundlePath;
+          @property (assign) BOOL reportResultsToIDE;
+          @end
+
+          __attribute__((constructor))
+          static void WDAAutoStartInit(void) {
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                  NSLog(@"[WDAAutoStart] Attempting to start XCTest runner...");
+
+                  NSBundle *mainBundle = [NSBundle mainBundle];
+                  NSString *pluginsPath = [mainBundle builtInPlugInsPath];
+                  NSString *xctestPath = nil;
+
+                  NSFileManager *fm = [NSFileManager defaultManager];
+                  NSArray *contents = [fm contentsOfDirectoryAtPath:pluginsPath error:nil];
+                  for (NSString *item in contents) {
+                      if ([item hasSuffix:@".xctest"]) {
+                          xctestPath = [pluginsPath stringByAppendingPathComponent:item];
+                          break;
+                      }
+                  }
+
+                  if (!xctestPath) {
+                      NSLog(@"[WDAAutoStart] ERROR: No .xctest bundle found in PlugIns");
+                      return;
+                  }
+
+                  NSLog(@"[WDAAutoStart] Found xctest bundle: %@", xctestPath);
+
+                  NSBundle *testBundle = [NSBundle bundleWithPath:xctestPath];
+                  if (![testBundle load]) {
+                      NSLog(@"[WDAAutoStart] ERROR: Failed to load xctest bundle");
+                      return;
+                  }
+
+                  // Try to start XCTest
+                  Class testSuite = NSClassFromString(@"XCTestSuite");
+                  if (testSuite) {
+                      NSLog(@"[WDAAutoStart] XCTest framework loaded, starting test suite...");
+                      // Invoke default test suite
+                      SEL defaultSel = NSSelectorFromString(@"defaultTestSuite");
+                      if ([testSuite respondsToSelector:defaultSel]) {
+                          #pragma clang diagnostic push
+                          #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                          id suite = [testSuite performSelector:defaultSel];
+                          SEL runSel = NSSelectorFromString(@"run");
+                          if ([suite respondsToSelector:runSel]) {
+                              [suite performSelector:runSel];
+                          }
+                          #pragma clang diagnostic pop
+                      }
+                  }
+
+                  NSLog(@"[WDAAutoStart] Auto-start sequence completed");
+              });
+          }
+          EOF
+
+          # Compile the dylib
+          clang -shared -framework Foundation -framework XCTest \
+            -arch arm64 \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -target arm64-apple-ios14.0 \
+            -o WDAAutoStart.dylib \
+            WDAAutoStart.m
+
+          echo "=== Auto-start dylib compiled ==="
+          file WDAAutoStart.dylib
+
+      - name: Package TrollStore-compatible IPA
+        run: |
+          BUNDLE_ID="${{ github.event.inputs.bundle_id }}"
+          DISPLAY_NAME="${{ github.event.inputs.display_name }}"
+          INCLUDE_AUTOSTART="${{ github.event.inputs.include_autostart }}"
+
+          # Find the built .app
+          APP_PATH=$(find WebDriverAgent/build -name "WebDriverAgentRunner-Runner.app" -type d | head -1)
+          echo "Found app at: $APP_PATH"
+
           if [ -z "$APP_PATH" ]; then
-            echo "❌ .app not found!"
+            echo "ERROR: WebDriverAgentRunner-Runner.app not found!"
+            find WebDriverAgent/build -name "*.app" -type d
             exit 1
           fi
-          
-          echo "📍 App: $APP_PATH"
-          echo ""
-          
-          ENTITLEMENTS="../resources/entitlements.plist"
-          
-          # Sign tất cả frameworks
-          echo "🔏 Signing frameworks..."
-          find "$APP_PATH/Frameworks" -type f -perm +111 ! -name "*.plist" ! -name "*.yml" | while read binary; do
-            echo "  Signing: $(basename $(dirname $binary))/$(basename $binary)"
-            ldid -S"$ENTITLEMENTS" "$binary" 2>/dev/null || ldid -S "$binary" 2>/dev/null || true
-          done
-          
-          # Sign dylibs in Frameworks
-          find "$APP_PATH/Frameworks" -name "*.dylib" | while read dylib; do
-            echo "  Signing dylib: $(basename $dylib)"
-            ldid -S"$ENTITLEMENTS" "$dylib" 2>/dev/null || true
-          done
-          
-          # Sign xctest plugin
-          echo ""
-          echo "🔏 Signing plugins..."
-          XCTEST_PATH="$APP_PATH/PlugIns/WebDriverAgentRunner.xctest"
-          if [ -d "$XCTEST_PATH" ]; then
-            # Sign WebDriverAgentLib framework
-            WDALIB="$XCTEST_PATH/Frameworks/WebDriverAgentLib.framework/WebDriverAgentLib"
-            if [ -f "$WDALIB" ]; then
-              echo "  Signing: WebDriverAgentLib"
-              ldid -S"$ENTITLEMENTS" "$WDALIB"
-            fi
+
+          # Create Payload directory
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+
+          TARGET_APP="Payload/WebDriverAgentRunner-Runner.app"
+
+          # === Patch Info.plist ===
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName '$DISPLAY_NAME'" "$TARGET_APP/Info.plist" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string '$DISPLAY_NAME'" "$TARGET_APP/Info.plist"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '$BUNDLE_ID.xctrunner'" "$TARGET_APP/Info.plist"
+
+          # Update xctest bundle ID too
+          XCTEST_DIR=$(find "$TARGET_APP/PlugIns" -name "*.xctest" -type d | head -1)
+          if [ -n "$XCTEST_DIR" ]; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '$BUNDLE_ID'" "$XCTEST_DIR/Info.plist" 2>/dev/null || true
+          fi
+
+          # === Patch MH_BUNDLE → MH_DYLIB for TrollStore ldid compatibility ===
+          python3 << 'PYEOF'
+          import struct, os, glob
+
+          def patch_bundle_to_dylib(filepath):
+              with open(filepath, 'rb') as f:
+                  data = bytearray(f.read())
+              magic = struct.unpack_from('<I', data, 0)[0]
+              patched = False
+
+              if magic == 0xfeedfacf or magic == 0xfeedface:  # Regular Mach-O
+                  ft = struct.unpack_from('<I', data, 12)[0]
+                  if ft == 8:
+                      struct.pack_into('<I', data, 12, 6)
+                      patched = True
+              elif magic in (0xbebafeca, 0xcafebabe):  # FAT binary
+                  nfat = struct.unpack_from('>I', data, 4)[0]
+                  for i in range(nfat):
+                      off = struct.unpack_from('>I', data, 8 + i*20 + 8)[0]
+                      ft = struct.unpack_from('<I', data, off + 12)[0]
+                      if ft == 8:
+                          struct.pack_into('<I', data, off + 12, 6)
+                          patched = True
+
+              if patched:
+                  with open(filepath, 'wb') as f:
+                      f.write(data)
+                  print(f"  PATCHED: {filepath}")
+              return patched
+
+          # Find all Mach-O binaries and patch MH_BUNDLE types
+          for root, dirs, files in os.walk("Payload"):
+              for fname in files:
+                  fpath = os.path.join(root, fname)
+                  try:
+                      with open(fpath, 'rb') as f:
+                          magic = struct.unpack('<I', f.read(4))[0]
+                      if magic in (0xfeedfacf, 0xfeedface, 0xbebafeca, 0xcafebabe):
+                          patch_bundle_to_dylib(fpath)
+                  except:
+                      pass
+          PYEOF
+
+          # === Inject auto-start dylib if requested ===
+          if [ "$INCLUDE_AUTOSTART" == "true" ] && [ -f "WDAAutoStart.dylib" ]; then
+            echo "=== Injecting auto-start dylib ==="
+            cp WDAAutoStart.dylib "$TARGET_APP/WDAAutoStart.dylib"
+
+            # Use install_name_tool to add load command
+            MAIN_BINARY="$TARGET_APP/WebDriverAgentRunner-Runner"
+            install_name_tool -add_rpath @executable_path/ "$MAIN_BINARY" 2>/dev/null || true
             
-            # Sign xctest binary
-            XCTEST_BIN="$XCTEST_PATH/WebDriverAgentRunner"
-            if [ -f "$XCTEST_BIN" ]; then
-              echo "  Signing: WebDriverAgentRunner (xctest)"
-              ldid -S"$ENTITLEMENTS" "$XCTEST_BIN"
-            fi
-          fi
-          
-          # Sign main binary LAST
-          echo ""
-          echo "🔏 Signing main binary..."
-          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
-          ldid -S"$ENTITLEMENTS" "$APP_PATH/$BINARY_NAME"
-          echo "  ✅ Signed: $BINARY_NAME"
-          
-          # Verify entitlements
-          echo ""
-          echo "🔍 Verify entitlements:"
-          ldid -e "$APP_PATH/$BINARY_NAME" 2>/dev/null | head -20
-          
-          echo ""
-          echo "✅ All binaries signed for TrollStore!"
+            # Use insert_dylib or manual approach
+            # We'll use a Python script to inject the LC_LOAD_DYLIB command
+            python3 << INJECT_EOF
+          import struct
 
-      # ====== PACKAGE IPA ======
-      - name: 📦 Đóng gói IPA
-        env:
-          DISPLAY_NAME: ${{ github.event.inputs.display_name || 'iPhone-Control' }}
-        run: |
-          cd WebDriverAgent
-          
-          APP_PATH=$(find ./build/Build/Products -name "*.app" -type d | grep "Runner" | head -1)
-          
-          # Copy icon
-          if [ -f "icon.png" ]; then
-            cp icon.png "$APP_PATH/icon.png"
-          fi
-          
-          # Create IPA
-          mkdir -p ipa_output/Payload
-          cp -r "$APP_PATH" ipa_output/Payload/
-          
-          cd ipa_output
-          IPA_NAME=$(echo "$DISPLAY_NAME" | tr ' ' '_' | tr '-' '_')
-          zip -r "../${IPA_NAME}.ipa" Payload/
-          cd ..
-          
-          echo "✅ IPA: ${IPA_NAME}.ipa ($(du -h "${IPA_NAME}.ipa" | cut -f1))"
+          binary_path = "$MAIN_BINARY"
 
-      # ====== UPLOAD ======
-      - name: 📤 Upload IPA
+          with open(binary_path, 'rb') as f:
+              data = bytearray(f.read())
+
+          magic = struct.unpack_from('<I', data, 0)[0]
+
+          def inject_dylib(data, offset):
+              """Inject LC_LOAD_DYLIB at the given Mach-O header offset"""
+              magic = struct.unpack_from('<I', data, offset)[0]
+              if magic == 0xfeedfacf:
+                  header_size = 32
+              elif magic == 0xfeedface:
+                  header_size = 28
+              else:
+                  return data
+
+              ncmds = struct.unpack_from('<I', data, offset + 16)[0]
+              sizeofcmds = struct.unpack_from('<I', data, offset + 20)[0]
+
+              # Dylib path
+              dylib_name = b'@executable_path/WDAAutoStart.dylib\x00'
+              # Pad to 8-byte alignment
+              while len(dylib_name) % 8 != 0:
+                  dylib_name += b'\x00'
+
+              # LC_LOAD_DYLIB = 0xC
+              cmd_size = 24 + len(dylib_name)  # cmd(4) + cmdsize(4) + name_offset(4) + timestamp(4) + current_version(4) + compat_version(4) + name
+              lc = struct.pack('<II', 0xC, cmd_size)
+              lc += struct.pack('<I', 24)  # name offset
+              lc += struct.pack('<I', 0)   # timestamp
+              lc += struct.pack('<I', 0x10000)  # current version 1.0.0
+              lc += struct.pack('<I', 0x10000)  # compat version 1.0.0
+              lc += dylib_name
+
+              # Insert after existing load commands
+              insert_pos = offset + header_size + sizeofcmds
+              data[insert_pos:insert_pos] = lc
+
+              # Update header
+              struct.pack_into('<I', data, offset + 16, ncmds + 1)
+              struct.pack_into('<I', data, offset + 20, sizeofcmds + cmd_size)
+
+              return data
+
+          if magic in (0xbebafeca, 0xcafebabe):
+              # FAT binary
+              nfat = struct.unpack_from('>I', data, 4)[0]
+              # Process from last to first to not mess up offsets
+              slices = []
+              for i in range(nfat):
+                  off = struct.unpack_from('>I', data, 8 + i*20 + 8)[0]
+                  slices.append((i, off))
+              for i, off in reversed(slices):
+                  data = inject_dylib(data, off)
+          else:
+              data = inject_dylib(data, 0)
+
+          with open(binary_path, 'wb') as f:
+              f.write(data)
+          print("Injected WDAAutoStart.dylib load command")
+          INJECT_EOF
+          fi
+
+          # === Remove code signatures (TrollStore will re-sign) ===
+          find Payload -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
+          find Payload -name "embedded.mobileprovision" -delete 2>/dev/null || true
+          find Payload -name "*.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
+
+          # === Create IPA ===
+          zip -r "WDA_TrollStore.ipa" Payload/
+          echo "=== IPA created ==="
+          ls -lh WDA_TrollStore.ipa
+
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-IPA-TrollStore
-          path: WebDriverAgent/*.ipa
+          name: WDA-TrollStore-IPA
+          path: WDA_TrollStore.ipa
           retention-days: 90
-
-      - name: 📋 Kết quả
-        env:
-          DISPLAY_NAME: ${{ github.event.inputs.display_name || 'iPhone-Control' }}
-          BUNDLE_PREFIX: ${{ github.event.inputs.bundle_id_prefix || 'com.facebook' }}
-        run: |
-          echo "=========================================="
-          echo "   ✅ BUILD HOÀN TẤT (TrollStore)!"
-          echo "=========================================="
-          echo "📱 Tên: $DISPLAY_NAME"
-          echo "🆔 Bundle ID: ${BUNDLE_PREFIX}.WebDriverAgentRunner.xctrunner"
-          echo "🔏 Signed: ldid (TrollStore compatible)"
-          echo "📲 Cài: Gửi IPA lên iPhone → Mở bằng TrollStore"
-          echo ""
-          echo "⚠️  KHÔNG dùng Sideloadly — cài trực tiếp qua TrollStore!"
-          echo "=========================================="
