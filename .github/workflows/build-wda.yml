@@ -6,11 +6,11 @@ on:
       bundle_id:
         description: 'Bundle ID for WDA'
         required: false
-        default: 'com.custom.WebDriverAgent'
+        default: 'com.facebook.WebDriverAgentRunner'
       display_name:
         description: 'App display name'
         required: false
-        default: 'WDA Agent'
+        default: 'iPhone-Control'
       include_autostart:
         description: 'Include auto-start dylib (launch XCTest on app open)'
         required: false
