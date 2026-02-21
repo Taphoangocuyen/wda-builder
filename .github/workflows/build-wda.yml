@@ -11,11 +11,6 @@ on:
         description: 'App display name'
         required: false
         default: 'iPhone-Control'
-      include_autostart:
-        description: 'Include auto-start dylib (launch XCTest on app open)'
-        required: false
-        type: boolean
-        default: true
 
 jobs:
   build:
@@ -39,7 +34,6 @@ jobs:
         run: |
           cd WebDriverAgent
 
-          # Build WDA for generic iOS device (arm64)
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
@@ -52,105 +46,14 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER="${{ github.event.inputs.bundle_id }}" \
             DEVELOPMENT_TEAM="" \
             ARCHS=arm64 \
-            ONLY_ACTIVE_ARCH=NO \
-            | tee build.log
+            ONLY_ACTIVE_ARCH=NO
 
           echo "=== Build completed ==="
-
-      - name: Create auto-start dylib
-        if: ${{ github.event.inputs.include_autostart == 'true' }}
-        run: |
-          # Create WDAAutoStart dylib that programmatically launches XCTest when app opens
-          cat > WDAAutoStart.m << 'EOF'
-          #import <Foundation/Foundation.h>
-          #import <objc/runtime.h>
-
-          // Forward declaration
-          @interface XCTestConfiguration : NSObject
-          @property (copy) NSString *productModuleName;
-          @property (copy) NSString *testBundlePath;
-          @property (assign) BOOL reportResultsToIDE;
-          @end
-
-          __attribute__((constructor))
-          static void WDAAutoStartInit(void) {
-              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                  NSLog(@"[WDAAutoStart] Attempting to start XCTest runner...");
-
-                  NSBundle *mainBundle = [NSBundle mainBundle];
-                  NSString *pluginsPath = [mainBundle builtInPlugInsPath];
-                  NSString *xctestPath = nil;
-
-                  NSFileManager *fm = [NSFileManager defaultManager];
-                  NSArray *contents = [fm contentsOfDirectoryAtPath:pluginsPath error:nil];
-                  for (NSString *item in contents) {
-                      if ([item hasSuffix:@".xctest"]) {
-                          xctestPath = [pluginsPath stringByAppendingPathComponent:item];
-                          break;
-                      }
-                  }
-
-                  if (!xctestPath) {
-                      NSLog(@"[WDAAutoStart] ERROR: No .xctest bundle found in PlugIns");
-                      return;
-                  }
-
-                  NSLog(@"[WDAAutoStart] Found xctest bundle: %@", xctestPath);
-
-                  NSBundle *testBundle = [NSBundle bundleWithPath:xctestPath];
-                  if (![testBundle load]) {
-                      NSLog(@"[WDAAutoStart] ERROR: Failed to load xctest bundle");
-                      return;
-                  }
-
-                  // Try to start XCTest
-                  Class testSuite = NSClassFromString(@"XCTestSuite");
-                  if (testSuite) {
-                      NSLog(@"[WDAAutoStart] XCTest framework loaded, starting test suite...");
-                      // Invoke default test suite
-                      SEL defaultSel = NSSelectorFromString(@"defaultTestSuite");
-                      if ([testSuite respondsToSelector:defaultSel]) {
-                          #pragma clang diagnostic push
-                          #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                          id suite = [testSuite performSelector:defaultSel];
-                          SEL runSel = NSSelectorFromString(@"run");
-                          if ([suite respondsToSelector:runSel]) {
-                              [suite performSelector:runSel];
-                          }
-                          #pragma clang diagnostic pop
-                      }
-                  }
-
-                  NSLog(@"[WDAAutoStart] Auto-start sequence completed");
-              });
-          }
-          EOF
-
-          # Find XCTest framework path
-          XCODE_PATH=$(xcode-select -p)
-          XCTEST_FW_PATH="${XCODE_PATH}/Platforms/iPhoneOS.platform/Developer/Library/Frameworks"
-          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-
-          echo "XCTest framework path: $XCTEST_FW_PATH"
-          ls -la "$XCTEST_FW_PATH/XCTest.framework" || echo "XCTest not at expected path"
-
-          # Compile the dylib
-          clang -shared -framework Foundation \
-            -F"$XCTEST_FW_PATH" -framework XCTest \
-            -arch arm64 \
-            -isysroot "$IOS_SDK" \
-            -target arm64-apple-ios14.0 \
-            -o WDAAutoStart.dylib \
-            WDAAutoStart.m
-
-          echo "=== Auto-start dylib compiled ==="
-          file WDAAutoStart.dylib
 
       - name: Package TrollStore-compatible IPA
         run: |
           BUNDLE_ID="${{ github.event.inputs.bundle_id }}"
           DISPLAY_NAME="${{ github.event.inputs.display_name }}"
-          INCLUDE_AUTOSTART="${{ github.event.inputs.include_autostart }}"
 
           # Find the built .app
           APP_PATH=$(find WebDriverAgent/build -name "WebDriverAgentRunner-Runner.app" -type d | head -1)
@@ -168,143 +71,112 @@ jobs:
 
           TARGET_APP="Payload/WebDriverAgentRunner-Runner.app"
 
+          # === List all files for debugging ===
+          echo "=== App contents ==="
+          find "$TARGET_APP" -type f
+
           # === Patch Info.plist ===
           /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName '$DISPLAY_NAME'" "$TARGET_APP/Info.plist" 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string '$DISPLAY_NAME'" "$TARGET_APP/Info.plist"
 
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '$BUNDLE_ID.xctrunner'" "$TARGET_APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '${BUNDLE_ID}.xctrunner'" "$TARGET_APP/Info.plist"
 
-          # Update xctest bundle ID too
+          # Update xctest bundle ID
           XCTEST_DIR=$(find "$TARGET_APP/PlugIns" -name "*.xctest" -type d | head -1)
           if [ -n "$XCTEST_DIR" ]; then
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '$BUNDLE_ID'" "$XCTEST_DIR/Info.plist" 2>/dev/null || true
           fi
 
-          # === Patch MH_BUNDLE → MH_DYLIB for TrollStore ldid compatibility ===
+          # === Remove all code signatures ===
+          echo "=== Removing code signatures ==="
+          find Payload -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
+          find Payload -name "embedded.mobileprovision" -delete 2>/dev/null || true
+          find Payload -name "*.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
+
+          # === Patch MH_BUNDLE to MH_DYLIB for TrollStore ldid ===
+          echo "=== Patching Mach-O binaries ==="
           python3 << 'PYEOF'
-          import struct, os, glob
+          import struct, os
+
+          def get_macho_info(filepath):
+              try:
+                  with open(filepath, 'rb') as f:
+                      data = f.read(32)
+                  if len(data) < 16:
+                      return None
+                  magic = struct.unpack_from('<I', data, 0)[0]
+                  if magic in (0xfeedfacf, 0xfeedface, 0xbebafeca, 0xcafebabe):
+                      return magic
+                  return None
+              except:
+                  return None
 
           def patch_bundle_to_dylib(filepath):
               with open(filepath, 'rb') as f:
                   data = bytearray(f.read())
+
               magic = struct.unpack_from('<I', data, 0)[0]
               patched = False
+              fname = os.path.basename(filepath)
 
-              if magic == 0xfeedfacf or magic == 0xfeedface:  # Regular Mach-O
+              if magic in (0xfeedfacf, 0xfeedface):
                   ft = struct.unpack_from('<I', data, 12)[0]
+                  print(f"  [{fname}] FileType: {ft}")
                   if ft == 8:
                       struct.pack_into('<I', data, 12, 6)
                       patched = True
-              elif magic in (0xbebafeca, 0xcafebabe):  # FAT binary
+                      print(f"  [{fname}] PATCHED: MH_BUNDLE -> MH_DYLIB")
+
+              elif magic in (0xbebafeca, 0xcafebabe):
                   nfat = struct.unpack_from('>I', data, 4)[0]
+                  print(f"  [{fname}] FAT binary with {nfat} slices")
                   for i in range(nfat):
-                      off = struct.unpack_from('>I', data, 8 + i*20 + 8)[0]
-                      ft = struct.unpack_from('<I', data, off + 12)[0]
-                      if ft == 8:
-                          struct.pack_into('<I', data, off + 12, 6)
-                          patched = True
+                      entry_offset = 8 + i * 20
+                      slice_offset = struct.unpack_from('>I', data, entry_offset + 8)[0]
+                      slice_magic = struct.unpack_from('<I', data, slice_offset)[0]
+                      if slice_magic in (0xfeedfacf, 0xfeedface):
+                          ft = struct.unpack_from('<I', data, slice_offset + 12)[0]
+                          if ft == 8:
+                              struct.pack_into('<I', data, slice_offset + 12, 6)
+                              patched = True
+                              print(f"  [{fname}] Slice {i} PATCHED: MH_BUNDLE -> MH_DYLIB")
 
               if patched:
                   with open(filepath, 'wb') as f:
                       f.write(data)
-                  print(f"  PATCHED: {filepath}")
               return patched
 
-          # Find all Mach-O binaries and patch MH_BUNDLE types
+          total_patched = 0
           for root, dirs, files in os.walk("Payload"):
               for fname in files:
                   fpath = os.path.join(root, fname)
-                  try:
-                      with open(fpath, 'rb') as f:
-                          magic = struct.unpack('<I', f.read(4))[0]
-                      if magic in (0xfeedfacf, 0xfeedface, 0xbebafeca, 0xcafebabe):
-                          patch_bundle_to_dylib(fpath)
-                  except:
-                      pass
+                  magic = get_macho_info(fpath)
+                  if magic is not None:
+                      if patch_bundle_to_dylib(fpath):
+                          total_patched += 1
+
+          print(f"\nTotal binaries patched: {total_patched}")
           PYEOF
 
-          # === Inject auto-start dylib if requested ===
-          if [ "$INCLUDE_AUTOSTART" == "true" ] && [ -f "WDAAutoStart.dylib" ]; then
-            echo "=== Injecting auto-start dylib ==="
-            cp WDAAutoStart.dylib "$TARGET_APP/WDAAutoStart.dylib"
+          # === Fakesign all binaries with ldid ===
+          echo "=== Installing ldid ==="
+          brew install ldid 2>/dev/null || true
 
-            # Use install_name_tool to add load command
-            MAIN_BINARY="$TARGET_APP/WebDriverAgentRunner-Runner"
-            install_name_tool -add_rpath @executable_path/ "$MAIN_BINARY" 2>/dev/null || true
-            
-            # Use insert_dylib or manual approach
-            # We'll use a Python script to inject the LC_LOAD_DYLIB command
-            python3 << INJECT_EOF
-          import struct
+          echo "=== Fakesigning binaries ==="
+          find Payload -type f | while read f; do
+            if file "$f" | grep -q "Mach-O"; then
+              echo "Signing: $f"
+              ldid -S "$f" 2>/dev/null || echo "  WARNING: ldid failed on $f"
+            fi
+          done
 
-          binary_path = "$MAIN_BINARY"
-
-          with open(binary_path, 'rb') as f:
-              data = bytearray(f.read())
-
-          magic = struct.unpack_from('<I', data, 0)[0]
-
-          def inject_dylib(data, offset):
-              """Inject LC_LOAD_DYLIB at the given Mach-O header offset"""
-              magic = struct.unpack_from('<I', data, offset)[0]
-              if magic == 0xfeedfacf:
-                  header_size = 32
-              elif magic == 0xfeedface:
-                  header_size = 28
-              else:
-                  return data
-
-              ncmds = struct.unpack_from('<I', data, offset + 16)[0]
-              sizeofcmds = struct.unpack_from('<I', data, offset + 20)[0]
-
-              # Dylib path
-              dylib_name = b'@executable_path/WDAAutoStart.dylib\x00'
-              # Pad to 8-byte alignment
-              while len(dylib_name) % 8 != 0:
-                  dylib_name += b'\x00'
-
-              # LC_LOAD_DYLIB = 0xC
-              cmd_size = 24 + len(dylib_name)  # cmd(4) + cmdsize(4) + name_offset(4) + timestamp(4) + current_version(4) + compat_version(4) + name
-              lc = struct.pack('<II', 0xC, cmd_size)
-              lc += struct.pack('<I', 24)  # name offset
-              lc += struct.pack('<I', 0)   # timestamp
-              lc += struct.pack('<I', 0x10000)  # current version 1.0.0
-              lc += struct.pack('<I', 0x10000)  # compat version 1.0.0
-              lc += dylib_name
-
-              # Insert after existing load commands
-              insert_pos = offset + header_size + sizeofcmds
-              data[insert_pos:insert_pos] = lc
-
-              # Update header
-              struct.pack_into('<I', data, offset + 16, ncmds + 1)
-              struct.pack_into('<I', data, offset + 20, sizeofcmds + cmd_size)
-
-              return data
-
-          if magic in (0xbebafeca, 0xcafebabe):
-              # FAT binary
-              nfat = struct.unpack_from('>I', data, 4)[0]
-              # Process from last to first to not mess up offsets
-              slices = []
-              for i in range(nfat):
-                  off = struct.unpack_from('>I', data, 8 + i*20 + 8)[0]
-                  slices.append((i, off))
-              for i, off in reversed(slices):
-                  data = inject_dylib(data, off)
-          else:
-              data = inject_dylib(data, 0)
-
-          with open(binary_path, 'wb') as f:
-              f.write(data)
-          print("Injected WDAAutoStart.dylib load command")
-          INJECT_EOF
-          fi
-
-          # === Remove code signatures (TrollStore will re-sign) ===
-          find Payload -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
-          find Payload -name "embedded.mobileprovision" -delete 2>/dev/null || true
-          find Payload -name "*.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
+          # === Verify all binaries ===
+          echo "=== Final verification ==="
+          find Payload -type f | while read f; do
+            if file "$f" | grep -q "Mach-O"; then
+              echo "OK: $f"
+            fi
+          done
 
           # === Create IPA ===
           zip -r "WDA_TrollStore.ipa" Payload/
