@@ -127,6 +127,30 @@ jobs:
           echo "=== App contents ==="
           find "$TARGET_APP" -type f
 
+          # === Custom App Icon ===
+          if [ -f "resources/icon.png" ]; then
+            echo "=== Setting custom app icon ==="
+            # Generate iOS icon sizes from source
+            sips -z 120 120 resources/icon.png --out "$TARGET_APP/AppIcon60x60@2x.png" 2>/dev/null || true
+            sips -z 180 180 resources/icon.png --out "$TARGET_APP/AppIcon60x60@3x.png" 2>/dev/null || true
+            sips -z 152 152 resources/icon.png --out "$TARGET_APP/AppIcon76x76@2x.png" 2>/dev/null || true
+            sips -z 167 167 resources/icon.png --out "$TARGET_APP/AppIcon83.5x83.5@2x.png" 2>/dev/null || true
+            # Also copy as icon.png fallback
+            cp resources/icon.png "$TARGET_APP/icon.png"
+
+            # Set CFBundleIcons in Info.plist
+            /usr/libexec/PlistBuddy -c "Delete :CFBundleIcons" "$TARGET_APP/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$TARGET_APP/Info.plist"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$TARGET_APP/Info.plist"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$TARGET_APP/Info.plist"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon60x60" "$TARGET_APP/Info.plist"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:1 string AppIcon76x76" "$TARGET_APP/Info.plist"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:2 string AppIcon83.5x83.5" "$TARGET_APP/Info.plist"
+            echo "  App icon set from resources/icon.png"
+          else
+            echo "  No custom icon found, using default WDA icon"
+          fi
+
           # === Patch Info.plist ===
           /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName '$DISPLAY_NAME'" "$TARGET_APP/Info.plist" 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string '$DISPLAY_NAME'" "$TARGET_APP/Info.plist"
@@ -138,6 +162,40 @@ jobs:
           if [ -n "$XCTEST_DIR" ]; then
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '$BUNDLE_ID'" "$XCTEST_DIR/Info.plist" 2>/dev/null || true
           fi
+
+          # === Self-launch config for TrollStore ===
+          echo "=== Configuring for TrollStore self-launch ==="
+          PLIST="$TARGET_APP/Info.plist"
+
+          # Allow launch from SpringBoard
+          /usr/libexec/PlistBuddy -c "Set :SBIsLaunchableDuringSetup true" "$PLIST" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :SBIsLaunchableDuringSetup bool true" "$PLIST"
+
+          # Full screen
+          /usr/libexec/PlistBuddy -c "Set :UIRequiresFullScreen true" "$PLIST" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :UIRequiresFullScreen bool true" "$PLIST"
+
+          # Background mode
+          /usr/libexec/PlistBuddy -c "Delete :UIBackgroundModes" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string continuous" "$PLIST"
+
+          # Device family (iPhone + iPad)
+          /usr/libexec/PlistBuddy -c "Delete :UIDeviceFamily" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:0 integer 1" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:1 integer 2" "$PLIST"
+
+          # Allow HTTP connections
+          /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$PLIST"
+
+          # Network permission
+          /usr/libexec/PlistBuddy -c "Set :NSLocalNetworkUsageDescription 'Required for device control'" "$PLIST" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string 'Required for device control'" "$PLIST"
+
+          echo "  Self-launch config applied"
 
           # === Remove all code signatures ===
           echo "=== Removing code signatures ==="
@@ -214,11 +272,20 @@ jobs:
           echo "=== Installing ldid ==="
           brew install ldid 2>/dev/null || true
 
-          echo "=== Fakesigning binaries ==="
+          echo "=== Fakesigning binaries with TrollStore entitlements ==="
+          ENTITLEMENTS="resources/entitlements.plist"
+          if [ ! -f "$ENTITLEMENTS" ]; then
+            echo "WARNING: entitlements.plist not found, using empty signature"
+            ENTITLEMENTS=""
+          fi
           find Payload -type f | while read f; do
             if file "$f" | grep -q "Mach-O"; then
               echo "Signing: $f"
-              ldid -S "$f" 2>/dev/null || echo "  WARNING: ldid failed on $f"
+              if [ -n "$ENTITLEMENTS" ]; then
+                ldid -S"$ENTITLEMENTS" "$f" 2>/dev/null || echo "  WARNING: ldid failed on $f"
+              else
+                ldid -S "$f" 2>/dev/null || echo "  WARNING: ldid failed on $f"
+              fi
             fi
           done
 
