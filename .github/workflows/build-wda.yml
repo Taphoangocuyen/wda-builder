@@ -10,7 +10,7 @@ on:
       display_name:
         description: 'App display name'
         required: false
-        default: 'IC-Helper'
+        default: 'iPhoneControl'
       auth_key:
         description: 'IPC Auth Key (leave empty to use repository secret IPC_AUTH_KEY)'
         required: false
