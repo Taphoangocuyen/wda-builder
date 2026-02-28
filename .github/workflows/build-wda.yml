@@ -35,40 +35,25 @@ jobs:
           xcode-version: latest-stable
 
       # ════════════════════════════════════════════
-      # IPC Auth Guard — inject directly into WDA source
+      # IPC Auth Guard — patch WDA source directly
+      # No +load, no swizzling, no timing issues
       # ════════════════════════════════════════════
-      - name: Inject IPC Auth Guard into WDA
+      - name: Patch WDA with auth guard
         run: |
-          # Determine auth key: input > secret > skip
           AUTH_KEY="${{ github.event.inputs.auth_key }}"
           if [ -z "$AUTH_KEY" ]; then
             AUTH_KEY="${{ secrets.IPC_AUTH_KEY }}"
           fi
 
           if [ -z "$AUTH_KEY" ]; then
-            echo "⚠️ No auth key provided — building WITHOUT auth protection"
+            echo "No auth key — building WITHOUT auth"
             echo "AUTH_ENABLED=false" >> $GITHUB_ENV
           else
-            echo "✅ Auth key found (${#AUTH_KEY} chars) — injecting auth guard"
+            ROUTE_PREFIX="ipc_${AUTH_KEY:0:8}"
+            echo "Auth key: ${#AUTH_KEY} chars, prefix: $ROUTE_PREFIX"
             echo "AUTH_ENABLED=true" >> $GITHUB_ENV
 
-            # Generate route prefix from auth key (first 8 chars)
-            ROUTE_PREFIX="ipc_${AUTH_KEY:0:8}"
-            echo "  Route prefix: $ROUTE_PREFIX"
-
-            # Replace placeholders in source
-            sed -i '' "s|__IPC_AUTH_KEY__|${AUTH_KEY}|g" src/IPCAuthGuard.m
-            sed -i '' "s|__IPC_ROUTE_PREFIX__|${ROUTE_PREFIX}|g" src/IPCAuthGuard.m
-
-            # Copy auth guard into WDA source tree
-            cp src/IPCAuthGuard.m WebDriverAgent/WebDriverAgentLib/Routing/IPCAuthGuard.m
-            echo "  Copied IPCAuthGuard.m → WebDriverAgentLib/Routing/"
-
-            # Add file to Xcode project using xcodeproj gem
-            gem install xcodeproj --no-document
-            ruby scripts/add_to_xcode.rb
-
-            echo "=== Auth guard injected into WDA project ==="
+            python3 scripts/patch_auth.py WebDriverAgent "$AUTH_KEY" "$ROUTE_PREFIX"
           fi
 
       - name: Build WebDriverAgent for iOS (arm64)
