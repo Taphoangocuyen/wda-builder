@@ -52,8 +52,13 @@ jobs:
             echo "✅ Auth key found (${#AUTH_KEY} chars) — building WITH auth protection"
             echo "AUTH_ENABLED=true" >> $GITHUB_ENV
 
-            # Replace placeholder in source with actual key
+            # Generate route prefix from auth key (first 8 chars)
+            ROUTE_PREFIX="ipc_${AUTH_KEY:0:8}"
+            echo "  Route prefix: $ROUTE_PREFIX"
+
+            # Replace placeholders in source
             sed -i '' "s|__IPC_AUTH_KEY__|${AUTH_KEY}|g" src/IPCAuthGuard.m
+            sed -i '' "s|__IPC_ROUTE_PREFIX__|${ROUTE_PREFIX}|g" src/IPCAuthGuard.m
 
             # Get iOS SDK path
             IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
