@@ -321,13 +321,13 @@ jobs:
           fi
 
           # === Create IPA ===
-          zip -r "WDA_TrollStore.ipa" Payload/
+          zip -r "WDA_PATH.ipa" Payload/
           echo "=== IPA created ==="
-          ls -lh WDA_TrollStore.ipa
+          ls -lh WDA_PATH.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-TrollStore-IPA
-          path: WDA_TrollStore.ipa
+          name: WDA-PATH-IPA
+          path: WDA_PATH.ipa
           retention-days: 90
