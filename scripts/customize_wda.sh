@@ -3,8 +3,8 @@
 # customize_wda.sh - Tuỳ chỉnh WebDriverAgent trước khi build
 # ============================================================
 
-DISPLAY_NAME="${DISPLAY_NAME:-Panda Helper}"
-BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.panda}"
+DISPLAY_NAME="${DISPLAY_NAME:-iPhone-Control}"
+BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.facebook}"
 MIN_IOS="${MIN_IOS:-15.0}"
 
 WDA_DIR="WebDriverAgent"
@@ -51,44 +51,29 @@ echo "✅ Min iOS: $MIN_IOS"
 echo "✅ Background Mode: continuous"
 
 # ------------------------------------------
-# 5. THÊM TẤT CẢ QUYỀN TRUY CẬP
+# 5. PERMISSIONS THIẾT YẾU (6 cái)
 # ------------------------------------------
+# Chỉ thêm permissions WDA thực sự cần cho điều khiển iPhone.
+# Bỏ 18 permissions không liên quan (Health, HomeKit, NFC, Siri, FaceID...)
+# → Giảm prompt quyền trên iPhone, khởi động nhanh hơn.
 PERMISSIONS=(
+    "NSLocalNetworkUsageDescription"
     "NSCameraUsageDescription"
     "NSPhotoLibraryUsageDescription"
     "NSMicrophoneUsageDescription"
     "NSLocationWhenInUseUsageDescription"
     "NSLocationAlwaysAndWhenInUseUsageDescription"
-    "NSContactsUsageDescription"
-    "NSCalendarsUsageDescription"
-    "NSRemindersUsageDescription"
-    "NSBluetoothAlwaysUsageDescription"
-    "NSBluetoothPeripheralUsageDescription"
-    "NSHealthShareUsageDescription"
-    "NSHealthUpdateUsageDescription"
-    "NSHealthClinicalHealthRecordsShareUsageDescription"
-    "NSHomeKitUsageDescription"
-    "NSMotionUsageDescription"
-    "NSSpeechRecognitionUsageDescription"
-    "NSSiriUsageDescription"
-    "NSFaceIDUsageDescription"
-    "NSLocalNetworkUsageDescription"
-    "NSUserTrackingUsageDescription"
-    "NSAppleMusicUsageDescription"
-    "NSVideoSubscriberAccountUsageDescription"
-    "NFCReaderUsageDescription"
-    "NSSensorKitUsageDescription"
 )
 
-PERM_TEXT="Access is necessary for automated testing."
+PERM_TEXT="Required for device automation"
 for perm in "${PERMISSIONS[@]}"; do
     /usr/libexec/PlistBuddy -c "Set :$perm $PERM_TEXT" "$RUNNER_PLIST" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Add :$perm string $PERM_TEXT" "$RUNNER_PLIST"
 done
-echo "✅ Đã thêm ${#PERMISSIONS[@]} quyền truy cập"
+echo "✅ Đã thêm ${#PERMISSIONS[@]} permissions thiết yếu"
 
 # ------------------------------------------
-# 6. CHO PHÉP HTTP KHÔNG BẢO MẬT
+# 6. CHO PHÉP HTTP (LOCAL NETWORK)
 # ------------------------------------------
 /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$RUNNER_PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$RUNNER_PLIST"
@@ -96,7 +81,15 @@ echo "✅ Đã thêm ${#PERMISSIONS[@]} quyền truy cập"
 echo "✅ NSAllowsArbitraryLoads: true"
 
 # ------------------------------------------
-# 7. CÀI ĐẶT BỔ SUNG
+# 7. BONJOUR SERVICES (iOS 14+ local network)
+# ------------------------------------------
+/usr/libexec/PlistBuddy -c "Delete :NSBonjourServices" "$RUNNER_PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :NSBonjourServices array" "$RUNNER_PLIST"
+/usr/libexec/PlistBuddy -c "Add :NSBonjourServices:0 string _http._tcp" "$RUNNER_PLIST"
+echo "✅ NSBonjourServices: _http._tcp"
+
+# ------------------------------------------
+# 8. CÀI ĐẶT BỔ SUNG
 # ------------------------------------------
 # Cho phép full screen
 /usr/libexec/PlistBuddy -c "Set :UIRequiresFullScreen true" "$RUNNER_PLIST" 2>/dev/null || \

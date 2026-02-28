@@ -2,9 +2,18 @@
 WebDriverAgent/
 build/
 *.ipa
+Payload/
 
 # macOS
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Ruby
+.bundle/
+Gemfile.lock
 
 # IDE
 .idea/

@@ -79,15 +79,16 @@ static BOOL checkAuthHeader(id connectionSelf) {
     NSString *authValue = ((id(*)(id, SEL, id))objc_msgSend)(
         request, NSSelectorFromString(@"headerField:"), kIPCAuthHeader
     );
-    return [kIPCAuthKey isEqualToString:authValue];
+    return authValue != nil && [kIPCAuthKey isEqualToString:authValue];
 }
 
 // ═══════════════════════════════════════════════════════
 // Swizzled HTTP handler — route prefix + auth check
 // ═══════════════════════════════════════════════════════
 static id ipc_httpResponseForMethod(id self, SEL _cmd, NSString *method, NSString *path) {
-    // /status luôn cho phép (health check cơ bản, không có data nhạy cảm)
-    if ([path isEqualToString:@"/status"] || [path hasPrefix:@"/status?"]) {
+    // Whitelist: /status và /health luôn cho phép (health check, không data nhạy cảm)
+    if ([path isEqualToString:@"/status"] || [path hasPrefix:@"/status?"]
+        || [path isEqualToString:@"/health"] || [path hasPrefix:@"/health?"]) {
         return ((id(*)(id, SEL, id, id))_orig_httpResponse)(self, _cmd, method, path);
     }
 

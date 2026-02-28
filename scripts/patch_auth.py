@@ -28,14 +28,18 @@ def patch_file(filepath, auth_key, route_prefix):
     # No extra imports needed, no custom classes
     replacement = target + '''
 
-    // ═══ IPC Auth Guard ═══
+    // ═══ IPC Auth Guard (Layer 1 — source patch) ═══
     {
-      BOOL _ipcIsStatus = [path isEqualToString:@"/status"] || [path hasPrefix:@"/status?"];
-      if (!_ipcIsStatus) {
+      // Whitelist: /status và /health luôn cho phép (health check, không data nhạy cảm)
+      BOOL _ipcIsPublic = [path isEqualToString:@"/status"]
+                       || [path hasPrefix:@"/status?"]
+                       || [path isEqualToString:@"/health"]
+                       || [path hasPrefix:@"/health?"];
+      if (!_ipcIsPublic) {
         NSString *_ipcPrefix = @"/''' + route_prefix + '''/";
         if ([path hasPrefix:_ipcPrefix]) {
           NSString *_ipcAuth = [request headerField:@"X-IPC-Auth"];
-          if ([@"''' + auth_key + '''" isEqualToString:_ipcAuth]) {
+          if (_ipcAuth != nil && [@"''' + auth_key + '''" isEqualToString:_ipcAuth]) {
             path = [path substringFromIndex:_ipcPrefix.length - 1];
           } else {
             path = @"/__ipc_blocked__";
