@@ -24,7 +24,7 @@ end
 target_group = routing_group || wda_lib_group || project.main_group
 puts "Adding to group: #{target_group.display_name}"
 
-file_ref = target_group.new_file('Routing/IPCAuthGuard.m')
+file_ref = target_group.new_file('IPCAuthGuard.m')
 puts "Added file reference: #{file_ref.path}"
 
 lib_target.source_build_phase.add_file_reference(file_ref)
