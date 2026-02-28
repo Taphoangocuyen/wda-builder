@@ -1,0 +1,11 @@
+# Build
+WebDriverAgent/
+build/
+*.ipa
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
