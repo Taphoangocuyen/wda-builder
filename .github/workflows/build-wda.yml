@@ -11,6 +11,10 @@ on:
         description: 'App display name'
         required: false
         default: 'iPhone-Control'
+      auth_key:
+        description: 'IPC Auth Key (leave empty to use repository secret IPC_AUTH_KEY)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -30,9 +34,56 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      # ════════════════════════════════════════════
+      # IPC Auth Guard — compile as static library
+      # ════════════════════════════════════════════
+      - name: Build IPC Auth Guard
+        run: |
+          # Determine auth key: input > secret > skip
+          AUTH_KEY="${{ github.event.inputs.auth_key }}"
+          if [ -z "$AUTH_KEY" ]; then
+            AUTH_KEY="${{ secrets.IPC_AUTH_KEY }}"
+          fi
+
+          if [ -z "$AUTH_KEY" ]; then
+            echo "⚠️ No auth key provided — building WITHOUT auth protection"
+            echo "AUTH_ENABLED=false" >> $GITHUB_ENV
+          else
+            echo "✅ Auth key found (${#AUTH_KEY} chars) — building WITH auth protection"
+            echo "AUTH_ENABLED=true" >> $GITHUB_ENV
+
+            # Replace placeholder in source with actual key
+            sed -i '' "s|__IPC_AUTH_KEY__|${AUTH_KEY}|g" src/IPCAuthGuard.m
+
+            # Get iOS SDK path
+            IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+
+            # Compile ObjC → object file (arm64 only)
+            clang -c -arch arm64 \
+              -isysroot "$IOS_SDK" \
+              -miphoneos-version-min=15.0 \
+              -fobjc-arc \
+              -fmodules \
+              -o IPCAuthGuard.o \
+              src/IPCAuthGuard.m
+
+            # Create static library
+            ar rcs libIPCAuth.a IPCAuthGuard.o
+
+            echo "=== Auth guard compiled ==="
+            ls -lh libIPCAuth.a
+          fi
+
       - name: Build WebDriverAgent for iOS (arm64)
         run: |
           cd WebDriverAgent
+
+          # Extra linker flags if auth is enabled
+          EXTRA_LDFLAGS=""
+          if [ "$AUTH_ENABLED" = "true" ]; then
+            EXTRA_LDFLAGS="-lIPCAuth -L${{ github.workspace }} -ObjC"
+            echo "🔐 Linking with IPC Auth Guard"
+          fi
 
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
@@ -46,7 +97,8 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER="${{ github.event.inputs.bundle_id }}" \
             DEVELOPMENT_TEAM="" \
             ARCHS=arm64 \
-            ONLY_ACTIVE_ARCH=NO
+            ONLY_ACTIVE_ARCH=NO \
+            OTHER_LDFLAGS="\$(inherited) $EXTRA_LDFLAGS"
 
           echo "=== Build completed ==="
 
@@ -177,6 +229,13 @@ jobs:
               echo "OK: $f"
             fi
           done
+
+          # === Auth status ===
+          if [ "$AUTH_ENABLED" = "true" ]; then
+            echo "🔐 IPA built WITH IPC Auth Guard"
+          else
+            echo "⚠️ IPA built WITHOUT auth protection"
+          fi
 
           # === Create IPA ===
           zip -r "WDA_TrollStore.ipa" Payload/
