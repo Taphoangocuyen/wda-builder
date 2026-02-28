@@ -151,14 +151,21 @@ static id ipc_httpResponseForMethod(id self, SEL _cmd, NSString *method, NSStrin
     if (routingConn) {
         [self installHookOnClass:routingConn];
     } else {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            Class rc = NSClassFromString(@"RoutingConnection");
-            if (rc) {
-                [self installHookOnClass:rc];
-            } else {
-                NSLog(@"[IPC-Auth] ERROR: RoutingConnection not found!");
+        // RoutingConnection chưa load — retry trên background queue
+        // Main queue KHÔNG hoạt động trong xctest context (TrollStore)
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            for (int attempt = 0; attempt < 60; attempt++) {
+                [NSThread sleepForTimeInterval:0.5];
+                Class rc = NSClassFromString(@"RoutingConnection");
+                if (rc) {
+                    NSLog(@"[IPC-Auth] RoutingConnection found after %.1fs", (attempt + 1) * 0.5);
+                    // HTTPDataResponse cũng cần sẵn sàng cho 403 response
+                    createForbiddenResponseClass();
+                    [self installHookOnClass:rc];
+                    return;
+                }
             }
+            NSLog(@"[IPC-Auth] ERROR: RoutingConnection not found after 30s!");
         });
     }
 }
