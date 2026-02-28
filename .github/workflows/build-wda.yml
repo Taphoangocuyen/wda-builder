@@ -67,48 +67,43 @@ jobs:
             # Add file to Xcode project using xcodeproj gem
             gem install xcodeproj --no-document
 
-            ruby << 'RUBYEOF'
-            require 'xcodeproj'
+            cat > /tmp/add_to_xcode.rb << 'EOF'
+require 'xcodeproj'
 
-            project_path = 'WebDriverAgent/WebDriverAgent.xcodeproj'
-            project = Xcodeproj::Project.open(project_path)
+project_path = 'WebDriverAgent/WebDriverAgent.xcodeproj'
+project = Xcodeproj::Project.open(project_path)
 
-            # Find WebDriverAgentLib target
-            lib_target = project.targets.find { |t| t.name == 'WebDriverAgentLib' }
-            if lib_target.nil?
-              puts "ERROR: WebDriverAgentLib target not found!"
-              puts "Available targets: #{project.targets.map(&:name).join(', ')}"
-              exit 1
-            end
-            puts "Found target: #{lib_target.name}"
+lib_target = project.targets.find { |t| t.name == 'WebDriverAgentLib' }
+if lib_target.nil?
+  puts "ERROR: WebDriverAgentLib target not found!"
+  puts "Available targets: #{project.targets.map(&:name).join(', ')}"
+  exit 1
+end
+puts "Found target: #{lib_target.name}"
 
-            # Find or create the Routing group
-            wda_lib_group = project.main_group.find_subpath('WebDriverAgentLib', false)
-            if wda_lib_group.nil?
-              # Try alternative paths
-              wda_lib_group = project.main_group.find_subpath('WebDriverAgentLib/WebDriverAgentLib', false)
-            end
+wda_lib_group = project.main_group.find_subpath('WebDriverAgentLib', false)
+if wda_lib_group.nil?
+  wda_lib_group = project.main_group.find_subpath('WebDriverAgentLib/WebDriverAgentLib', false)
+end
 
-            routing_group = nil
-            if wda_lib_group
-              routing_group = wda_lib_group.find_subpath('Routing', false)
-            end
+routing_group = nil
+if wda_lib_group
+  routing_group = wda_lib_group.find_subpath('Routing', false)
+end
 
-            # Use WebDriverAgentLib group or main group as fallback
-            target_group = routing_group || wda_lib_group || project.main_group
-            puts "Adding to group: #{target_group.display_name}"
+target_group = routing_group || wda_lib_group || project.main_group
+puts "Adding to group: #{target_group.display_name}"
 
-            # Add file reference
-            file_ref = target_group.new_file('Routing/IPCAuthGuard.m')
-            puts "Added file reference: #{file_ref.path}"
+file_ref = target_group.new_file('Routing/IPCAuthGuard.m')
+puts "Added file reference: #{file_ref.path}"
 
-            # Add to compile sources
-            lib_target.source_build_phase.add_file_reference(file_ref)
-            puts "Added to compile sources of #{lib_target.name}"
+lib_target.source_build_phase.add_file_reference(file_ref)
+puts "Added to compile sources of #{lib_target.name}"
 
-            project.save
-            puts "✅ Xcode project updated successfully"
-            RUBYEOF
+project.save
+puts "Xcode project updated successfully"
+EOF
+            ruby /tmp/add_to_xcode.rb
 
             echo "=== Auth guard injected into WDA project ==="
           fi
