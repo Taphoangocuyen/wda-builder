@@ -10,7 +10,7 @@ on:
       display_name:
         description: 'App display name'
         required: false
-        default: 'iPhoneControl'
+        default: 'iPhone Control'
       auth_key:
         description: 'IPC Auth Key (leave empty to use repository secret IPC_AUTH_KEY)'
         required: false
@@ -254,13 +254,13 @@ jobs:
           fi
 
           # === Create IPA ===
-          zip -r "IC-Helper.ipa" Payload/
+          zip -r "iPhoneControl.ipa" Payload/
           echo "=== IPA created ==="
-          ls -lh IC-Helper.ipa
+          ls -lh iPhoneControl.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: IC-Helper
-          path: IC-Helper.ipa
+          name: iPhoneControl
+          path: iPhoneControl.ipa
           retention-days: 90
