@@ -10,7 +10,7 @@ on:
       display_name:
         description: 'App display name'
         required: false
-        default: 'iPhone-Control'
+        default: 'IC-Helper'
       auth_key:
         description: 'IPC Auth Key (leave empty to use repository secret IPC_AUTH_KEY)'
         required: false
@@ -254,13 +254,13 @@ jobs:
           fi
 
           # === Create IPA ===
-          zip -r "WDA_TrollStore.ipa" Payload/
+          zip -r "IC-Helper.ipa" Payload/
           echo "=== IPA created ==="
-          ls -lh WDA_TrollStore.ipa
+          ls -lh IC-Helper.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-TrollStore-IPA
-          path: WDA_TrollStore.ipa
+          name: IC-Helper
+          path: IC-Helper.ipa
           retention-days: 90
