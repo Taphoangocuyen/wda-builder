@@ -1,4 +1,4 @@
-name: Build WDA for TrollStore
+name: Build WDA PATH for TrollStore
 
 on:
   workflow_dispatch:
