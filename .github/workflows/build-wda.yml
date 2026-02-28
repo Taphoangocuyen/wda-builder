@@ -29,26 +29,15 @@ jobs:
           cd WebDriverAgent
           echo "WDA version: $(git describe --tags --always)"
 
-      - name: Customize WDA branding
-        run: |
-          cd WebDriverAgent
-          # Replace "Automation Running" with "iPhone Control Running"
-          find . -type f \( -name "*.m" -o -name "*.swift" -o -name "*.strings" -o -name "*.storyboard" -o -name "*.xib" \) \
-            -exec grep -l "Automation Running" {} \; | while read f; do
-            echo "Patching: $f"
-            sed -i '' 's/Automation Running/iPhone Control Running/g' "$f"
-          done
-          echo "=== Branding customized ==="
-
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
       # ════════════════════════════════════════════
-      # IPC Auth Guard — compile as static library
+      # IPC Auth Guard — inject directly into WDA source
       # ════════════════════════════════════════════
-      - name: Build IPC Auth Guard
+      - name: Inject IPC Auth Guard into WDA
         run: |
           # Determine auth key: input > secret > skip
           AUTH_KEY="${{ github.event.inputs.auth_key }}"
@@ -60,7 +49,7 @@ jobs:
             echo "⚠️ No auth key provided — building WITHOUT auth protection"
             echo "AUTH_ENABLED=false" >> $GITHUB_ENV
           else
-            echo "✅ Auth key found (${#AUTH_KEY} chars) — building WITH auth protection"
+            echo "✅ Auth key found (${#AUTH_KEY} chars) — injecting auth guard"
             echo "AUTH_ENABLED=true" >> $GITHUB_ENV
 
             # Generate route prefix from auth key (first 8 chars)
@@ -71,35 +60,62 @@ jobs:
             sed -i '' "s|__IPC_AUTH_KEY__|${AUTH_KEY}|g" src/IPCAuthGuard.m
             sed -i '' "s|__IPC_ROUTE_PREFIX__|${ROUTE_PREFIX}|g" src/IPCAuthGuard.m
 
-            # Get iOS SDK path
-            IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+            # Copy auth guard into WDA source tree
+            cp src/IPCAuthGuard.m WebDriverAgent/WebDriverAgentLib/Routing/IPCAuthGuard.m
+            echo "  Copied IPCAuthGuard.m → WebDriverAgentLib/Routing/"
 
-            # Compile ObjC → object file (arm64 only)
-            clang -c -arch arm64 \
-              -isysroot "$IOS_SDK" \
-              -miphoneos-version-min=15.0 \
-              -fobjc-arc \
-              -fmodules \
-              -o IPCAuthGuard.o \
-              src/IPCAuthGuard.m
+            # Add file to Xcode project using xcodeproj gem
+            gem install xcodeproj --no-document
 
-            # Create static library
-            ar rcs libIPCAuth.a IPCAuthGuard.o
+            ruby << 'RUBYEOF'
+            require 'xcodeproj'
 
-            echo "=== Auth guard compiled ==="
-            ls -lh libIPCAuth.a
+            project_path = 'WebDriverAgent/WebDriverAgent.xcodeproj'
+            project = Xcodeproj::Project.open(project_path)
+
+            # Find WebDriverAgentLib target
+            lib_target = project.targets.find { |t| t.name == 'WebDriverAgentLib' }
+            if lib_target.nil?
+              puts "ERROR: WebDriverAgentLib target not found!"
+              puts "Available targets: #{project.targets.map(&:name).join(', ')}"
+              exit 1
+            end
+            puts "Found target: #{lib_target.name}"
+
+            # Find or create the Routing group
+            wda_lib_group = project.main_group.find_subpath('WebDriverAgentLib', false)
+            if wda_lib_group.nil?
+              # Try alternative paths
+              wda_lib_group = project.main_group.find_subpath('WebDriverAgentLib/WebDriverAgentLib', false)
+            end
+
+            routing_group = nil
+            if wda_lib_group
+              routing_group = wda_lib_group.find_subpath('Routing', false)
+            end
+
+            # Use WebDriverAgentLib group or main group as fallback
+            target_group = routing_group || wda_lib_group || project.main_group
+            puts "Adding to group: #{target_group.display_name}"
+
+            # Add file reference
+            file_ref = target_group.new_file('Routing/IPCAuthGuard.m')
+            puts "Added file reference: #{file_ref.path}"
+
+            # Add to compile sources
+            lib_target.source_build_phase.add_file_reference(file_ref)
+            puts "Added to compile sources of #{lib_target.name}"
+
+            project.save
+            puts "✅ Xcode project updated successfully"
+            RUBYEOF
+
+            echo "=== Auth guard injected into WDA project ==="
           fi
 
       - name: Build WebDriverAgent for iOS (arm64)
         run: |
           cd WebDriverAgent
-
-          # Extra linker flags if auth is enabled
-          EXTRA_LDFLAGS=""
-          if [ "$AUTH_ENABLED" = "true" ]; then
-            EXTRA_LDFLAGS="-lIPCAuth -L${{ github.workspace }} -ObjC"
-            echo "🔐 Linking with IPC Auth Guard"
-          fi
 
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
@@ -113,8 +129,7 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER="${{ github.event.inputs.bundle_id }}" \
             DEVELOPMENT_TEAM="" \
             ARCHS=arm64 \
-            ONLY_ACTIVE_ARCH=NO \
-            OTHER_LDFLAGS="\$(inherited) $EXTRA_LDFLAGS"
+            ONLY_ACTIVE_ARCH=NO
 
           echo "=== Build completed ==="
 
@@ -139,22 +154,15 @@ jobs:
 
           TARGET_APP="Payload/WebDriverAgentRunner-Runner.app"
 
-          # === List all files for debugging ===
-          echo "=== App contents ==="
-          find "$TARGET_APP" -type f
-
           # === Custom App Icon ===
           if [ -f "resources/icon.png" ]; then
             echo "=== Setting custom app icon ==="
-            # Generate iOS icon sizes from source
             sips -z 120 120 resources/icon.png --out "$TARGET_APP/AppIcon60x60@2x.png" 2>/dev/null || true
             sips -z 180 180 resources/icon.png --out "$TARGET_APP/AppIcon60x60@3x.png" 2>/dev/null || true
             sips -z 152 152 resources/icon.png --out "$TARGET_APP/AppIcon76x76@2x.png" 2>/dev/null || true
             sips -z 167 167 resources/icon.png --out "$TARGET_APP/AppIcon83.5x83.5@2x.png" 2>/dev/null || true
-            # Also copy as icon.png fallback
             cp resources/icon.png "$TARGET_APP/icon.png"
 
-            # Set CFBundleIcons in Info.plist
             /usr/libexec/PlistBuddy -c "Delete :CFBundleIcons" "$TARGET_APP/Info.plist" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$TARGET_APP/Info.plist"
             /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$TARGET_APP/Info.plist"
@@ -162,9 +170,7 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon60x60" "$TARGET_APP/Info.plist"
             /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:1 string AppIcon76x76" "$TARGET_APP/Info.plist"
             /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:2 string AppIcon83.5x83.5" "$TARGET_APP/Info.plist"
-            echo "  App icon set from resources/icon.png"
-          else
-            echo "  No custom icon found, using default WDA icon"
+            echo "  App icon set"
           fi
 
           # === Patch Info.plist ===
@@ -173,7 +179,6 @@ jobs:
 
           /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '${BUNDLE_ID}.xctrunner'" "$TARGET_APP/Info.plist"
 
-          # Update xctest bundle ID
           XCTEST_DIR=$(find "$TARGET_APP/PlugIns" -name "*.xctest" -type d | head -1)
           if [ -n "$XCTEST_DIR" ]; then
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '$BUNDLE_ID'" "$XCTEST_DIR/Info.plist" 2>/dev/null || true
@@ -183,45 +188,36 @@ jobs:
           echo "=== Configuring for TrollStore self-launch ==="
           PLIST="$TARGET_APP/Info.plist"
 
-          # Allow launch from SpringBoard
           /usr/libexec/PlistBuddy -c "Set :SBIsLaunchableDuringSetup true" "$PLIST" 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Add :SBIsLaunchableDuringSetup bool true" "$PLIST"
 
-          # Full screen
           /usr/libexec/PlistBuddy -c "Set :UIRequiresFullScreen true" "$PLIST" 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Add :UIRequiresFullScreen bool true" "$PLIST"
 
-          # Background mode
           /usr/libexec/PlistBuddy -c "Delete :UIBackgroundModes" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string continuous" "$PLIST"
 
-          # Device family (iPhone + iPad)
           /usr/libexec/PlistBuddy -c "Delete :UIDeviceFamily" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily array" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:0 integer 1" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:1 integer 2" "$PLIST"
 
-          # Allow HTTP connections
           /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$PLIST"
 
-          # Network permission
           /usr/libexec/PlistBuddy -c "Set :NSLocalNetworkUsageDescription 'Required for device control'" "$PLIST" 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string 'Required for device control'" "$PLIST"
 
           echo "  Self-launch config applied"
 
           # === Remove all code signatures ===
-          echo "=== Removing code signatures ==="
           find Payload -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
           find Payload -name "embedded.mobileprovision" -delete 2>/dev/null || true
           find Payload -name "*.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # === Patch MH_BUNDLE to MH_DYLIB (Frameworks ONLY) ===
-          # CHÚ Ý: Chỉ patch file trong Frameworks/, KHÔNG patch xctest binary
-          # vì xctest binary không có LC_ID_DYLIB → dyld crash khi load
           echo "=== Patching Mach-O binaries (Frameworks only) ==="
           python3 << 'PYEOF'
           import struct, os
@@ -249,7 +245,6 @@ jobs:
 
               if magic in (0xfeedfacf, 0xfeedface):
                   ft = struct.unpack_from('<I', data, 12)[0]
-                  print(f"  [{fname}] FileType: {ft}")
                   if ft == 8:
                       struct.pack_into('<I', data, 12, 6)
                       patched = True
@@ -257,7 +252,6 @@ jobs:
 
               elif magic in (0xbebafeca, 0xcafebabe):
                   nfat = struct.unpack_from('>I', data, 4)[0]
-                  print(f"  [{fname}] FAT binary with {nfat} slices")
                   for i in range(nfat):
                       entry_offset = 8 + i * 20
                       slice_offset = struct.unpack_from('>I', data, entry_offset + 8)[0]
@@ -267,7 +261,7 @@ jobs:
                           if ft == 8:
                               struct.pack_into('<I', data, slice_offset + 12, 6)
                               patched = True
-                              print(f"  [{fname}] Slice {i} PATCHED: MH_BUNDLE -> MH_DYLIB")
+                              print(f"  [{fname}] Slice {i} PATCHED")
 
               if patched:
                   with open(filepath, 'wb') as f:
@@ -278,14 +272,7 @@ jobs:
           for root, dirs, files in os.walk("Payload"):
               for fname in files:
                   fpath = os.path.join(root, fname)
-                  # Chỉ patch file trong Frameworks/ (dylib thật)
-                  # Bỏ qua xctest binary trong PlugIns/
                   if "/Frameworks/" not in fpath.replace("\\", "/"):
-                      magic = get_macho_info(fpath)
-                      if magic is not None:
-                          ft_check = struct.unpack_from('<I', open(fpath,'rb').read(16), 12)[0] if magic in (0xfeedfacf, 0xfeedface) else -1
-                          if ft_check == 8:
-                              print(f"  SKIP (not in Frameworks): {fpath}")
                       continue
                   magic = get_macho_info(fpath)
                   if magic is not None:
@@ -316,29 +303,21 @@ jobs:
             fi
           done
 
-          # === Verify all binaries ===
-          echo "=== Final verification ==="
-          find Payload -type f | while read f; do
-            if file "$f" | grep -q "Mach-O"; then
-              echo "OK: $f"
-            fi
-          done
-
           # === Auth status ===
           if [ "$AUTH_ENABLED" = "true" ]; then
-            echo "🔐 IPA built WITH IPC Auth Guard"
+            echo "🔐 IPA built WITH IPC Auth Guard (injected into WebDriverAgentLib)"
           else
             echo "⚠️ IPA built WITHOUT auth protection"
           fi
 
           # === Create IPA ===
-          zip -r "WDA_PATH.ipa" Payload/
+          zip -r "WDA_TrollStore.ipa" Payload/
           echo "=== IPA created ==="
-          ls -lh WDA_PATH.ipa
+          ls -lh WDA_TrollStore.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-PATH-IPA
-          path: WDA_PATH.ipa
+          name: WDA-TrollStore-IPA
+          path: WDA_TrollStore.ipa
           retention-days: 90
