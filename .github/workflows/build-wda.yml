@@ -29,6 +29,17 @@ jobs:
           cd WebDriverAgent
           echo "WDA version: $(git describe --tags --always)"
 
+      - name: Customize WDA branding
+        run: |
+          cd WebDriverAgent
+          # Replace "Automation Running" with "iPhone Control Running"
+          find . -type f \( -name "*.m" -o -name "*.swift" -o -name "*.strings" -o -name "*.storyboard" -o -name "*.xib" \) \
+            -exec grep -l "Automation Running" {} \; | while read f; do
+            echo "Patching: $f"
+            sed -i '' 's/Automation Running/iPhone Control Running/g' "$f"
+          done
+          echo "=== Branding customized ==="
+
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
