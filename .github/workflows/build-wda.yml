@@ -203,8 +203,10 @@ jobs:
           find Payload -name "embedded.mobileprovision" -delete 2>/dev/null || true
           find Payload -name "*.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
 
-          # === Patch MH_BUNDLE to MH_DYLIB for TrollStore ldid ===
-          echo "=== Patching Mach-O binaries ==="
+          # === Patch MH_BUNDLE to MH_DYLIB (Frameworks ONLY) ===
+          # CHÚ Ý: Chỉ patch file trong Frameworks/, KHÔNG patch xctest binary
+          # vì xctest binary không có LC_ID_DYLIB → dyld crash khi load
+          echo "=== Patching Mach-O binaries (Frameworks only) ==="
           python3 << 'PYEOF'
           import struct, os
 
@@ -260,6 +262,15 @@ jobs:
           for root, dirs, files in os.walk("Payload"):
               for fname in files:
                   fpath = os.path.join(root, fname)
+                  # Chỉ patch file trong Frameworks/ (dylib thật)
+                  # Bỏ qua xctest binary trong PlugIns/
+                  if "/Frameworks/" not in fpath.replace("\\", "/"):
+                      magic = get_macho_info(fpath)
+                      if magic is not None:
+                          ft_check = struct.unpack_from('<I', open(fpath,'rb').read(16), 12)[0] if magic in (0xfeedfacf, 0xfeedface) else -1
+                          if ft_check == 8:
+                              print(f"  SKIP (not in Frameworks): {fpath}")
+                      continue
                   magic = get_macho_info(fpath)
                   if magic is not None:
                       if patch_bundle_to_dylib(fpath):
