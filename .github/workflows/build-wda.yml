@@ -61,23 +61,10 @@ jobs:
           xcode-version: latest-stable
 
       # ════════════════════════════════════════════════════════
-      # Bước 0.5: Cache dependencies (ldid, xcodeproj)
+      # Bước 0.5: Install ldid (không cache — tránh lỗi dependency)
       # ════════════════════════════════════════════════════════
-      - name: Cache Homebrew ldid
-        id: cache-ldid
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/Cellar/ldid
-            /opt/homebrew/Cellar/ldid
-          key: ldid-${{ runner.os }}-${{ runner.arch }}
-
       - name: Install ldid
-        if: steps.cache-ldid.outputs.cache-hit != 'true'
         run: brew install ldid
-
-      - name: Ensure ldid is linked
-        run: brew link ldid 2>/dev/null || true
 
       # ════════════════════════════════════════════════════════
       # Bước 1: Customize WDA (permissions, MinimumOSVersion...)
