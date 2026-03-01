@@ -412,12 +412,19 @@ jobs:
                       f.write(data)
               return patched
 
+          # Patch tất cả MH_BUNDLE → MH_DYLIB (Frameworks + PlugIns xctest)
+          # KHÔNG patch main executable (đã là MH_EXECUTE)
+          main_exe = os.path.join("Payload", "WebDriverAgentRunner-Runner.app", "WebDriverAgentRunner-Runner")
+          main_exe_real = os.path.realpath(main_exe) if os.path.exists(main_exe) else ""
+
           total_patched = 0
           for root, dirs, files in os.walk("Payload"):
               for fname in files:
                   fpath = os.path.join(root, fname)
-                  if "/Frameworks/" not in fpath.replace("\\", "/"):
+                  # Bỏ qua main executable
+                  if os.path.realpath(fpath) == main_exe_real:
                       continue
+                  # Bỏ qua non-binary files (plist, png, etc)
                   magic = get_macho_info(fpath)
                   if magic is not None:
                       if patch_bundle_to_dylib(fpath):
