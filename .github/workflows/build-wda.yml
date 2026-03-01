@@ -93,26 +93,57 @@ jobs:
       # Bước 2: Patch auth — Layer 1 (inject vào RoutingConnection.m)
       # ════════════════════════════════════════════════════════
       - name: Patch WDA with auth guard (Layer 1 — source patch)
+        env:
+          INPUT_AUTH_KEY: ${{ github.event.inputs.auth_key }}
+          SECRET_AUTH_KEY: ${{ secrets.IPC_AUTH_KEY }}
         run: |
-          AUTH_KEY="${{ github.event.inputs.auth_key }}"
-          if [ -z "$AUTH_KEY" ]; then
-            AUTH_KEY="${{ secrets.IPC_AUTH_KEY }}"
-          fi
+          set -euo pipefail
 
+          # ── Debug: kiểm tra nguồn auth key ──
+          echo "=== Auth Key Debug ==="
+          echo "  Input auth_key length: ${#INPUT_AUTH_KEY}"
+          echo "  Secret IPC_AUTH_KEY length: ${#SECRET_AUTH_KEY}"
+
+          # Ưu tiên: input > secret
+          AUTH_KEY="$INPUT_AUTH_KEY"
           if [ -z "$AUTH_KEY" ]; then
-            echo "⚠️ No auth key — building WITHOUT auth"
-            echo "AUTH_ENABLED=false" >> $GITHUB_ENV
-            echo "AUTH_KEY=" >> $GITHUB_ENV
-            echo "ROUTE_PREFIX=" >> $GITHUB_ENV
+            echo "  Input trống → dùng repository secret"
+            AUTH_KEY="$SECRET_AUTH_KEY"
           else
-            ROUTE_PREFIX="ipc_${AUTH_KEY:0:8}"
-            echo "🔐 Auth key: ${#AUTH_KEY} chars, prefix: $ROUTE_PREFIX"
-            echo "AUTH_ENABLED=true" >> $GITHUB_ENV
-            echo "AUTH_KEY=$AUTH_KEY" >> $GITHUB_ENV
-            echo "ROUTE_PREFIX=$ROUTE_PREFIX" >> $GITHUB_ENV
-
-            python3 scripts/patch_auth.py WebDriverAgent "$AUTH_KEY" "$ROUTE_PREFIX"
+            echo "  Dùng auth key từ workflow input"
           fi
+
+          echo "  Final AUTH_KEY length: ${#AUTH_KEY}"
+
+          if [ -z "$AUTH_KEY" ]; then
+            echo ""
+            echo "╔══════════════════════════════════════════════════════╗"
+            echo "║  FATAL: Không có auth key!                          ║"
+            echo "║                                                      ║"
+            echo "║  Kiểm tra: Settings → Secrets → Actions             ║"
+            echo "║  Secret name: IPC_AUTH_KEY                           ║"
+            echo "╚══════════════════════════════════════════════════════╝"
+            exit 1
+          fi
+
+          if [ ${#AUTH_KEY} -lt 16 ]; then
+            echo "FATAL: Auth key quá ngắn (${#AUTH_KEY} chars). Tối thiểu 16 chars!"
+            exit 1
+          fi
+
+          ROUTE_PREFIX="ipc_${AUTH_KEY:0:8}"
+          echo "  Auth key: ${#AUTH_KEY} chars, prefix: $ROUTE_PREFIX"
+
+          echo "AUTH_ENABLED=true" >> $GITHUB_ENV
+          {
+            echo "AUTH_KEY<<AUTHEOF"
+            echo "$AUTH_KEY"
+            echo "AUTHEOF"
+          } >> $GITHUB_ENV
+          echo "ROUTE_PREFIX=$ROUTE_PREFIX" >> $GITHUB_ENV
+
+          python3 scripts/patch_auth.py WebDriverAgent "$AUTH_KEY" "$ROUTE_PREFIX"
+          echo "  ✅ Layer 1 patched"
 
       # ════════════════════════════════════════════════════════
       # Bước 3: Auth guard — Layer 2 (IPCAuthGuard.m swizzle backup)
@@ -120,6 +151,7 @@ jobs:
       - name: Add IPCAuthGuard.m to Xcode project (Layer 2 — swizzle backup)
         if: env.AUTH_ENABLED == 'true'
         run: |
+          set -euo pipefail
           echo "=== Adding IPCAuthGuard.m (double-layer auth) ==="
 
           # Tìm thư mục Routing trong WDA source
@@ -137,10 +169,16 @@ jobs:
           # Replace placeholders với actual keys
           sed -i '' "s|__IPC_AUTH_KEY__|$AUTH_KEY|g" "$ROUTING_DIR/IPCAuthGuard.m"
           sed -i '' "s|__IPC_ROUTE_PREFIX__|$ROUTE_PREFIX|g" "$ROUTING_DIR/IPCAuthGuard.m"
-          echo "  Placeholders replaced"
+
+          # Verify placeholders đã được thay thế
+          if grep -q "__IPC_AUTH_KEY__" "$ROUTING_DIR/IPCAuthGuard.m"; then
+            echo "FATAL: Placeholder __IPC_AUTH_KEY__ chưa được thay thế!"
+            exit 1
+          fi
+          echo "  ✅ Placeholders verified"
 
           # Thêm vào Xcode project
-          gem install xcodeproj 2>/dev/null
+          gem install xcodeproj
           ruby scripts/add_to_xcode.rb
           echo "  ✅ IPCAuthGuard.m added to Xcode project"
 
@@ -479,6 +517,36 @@ jobs:
             echo "ERROR: WebDriverAgentLib không tìm thấy!"
             exit 1
           }
+
+          # ══════════════════════════════════════
+          # Verify auth guard trong binary
+          # ══════════════════════════════════════
+          if [ "${{ env.AUTH_ENABLED }}" = "true" ]; then
+            echo "=== Verifying auth guard in binary ==="
+            TEMP_VERIFY=$(mktemp -d)
+            unzip -q "${IPA_NAME}.ipa" -d "$TEMP_VERIFY"
+
+            AUTH_FOUND=false
+            while IFS= read -r -d '' bf; do
+              if file "$bf" | grep -q "Mach-O"; then
+                if strings "$bf" | grep -q "IPC-Auth\|ipc_\|IPCAuthGuard\|__ipc_blocked__"; then
+                  echo "  ✅ Auth strings found in: $(basename "$bf")"
+                  AUTH_FOUND=true
+                fi
+              fi
+            done < <(find "$TEMP_VERIFY" -type f -print0)
+
+            rm -rf "$TEMP_VERIFY"
+
+            if [ "$AUTH_FOUND" = "false" ]; then
+              echo ""
+              echo "╔══════════════════════════════════════════════════════╗"
+              echo "║  FATAL: Auth guard KHÔNG có trong binary!            ║"
+              echo "║  Auth key đã set nhưng không được compile vào WDA.  ║"
+              echo "╚══════════════════════════════════════════════════════╝"
+              exit 1
+            fi
+          fi
 
           # Log build info
           echo ""
