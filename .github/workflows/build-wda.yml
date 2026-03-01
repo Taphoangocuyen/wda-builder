@@ -295,6 +295,40 @@ jobs:
           echo "  ✅ TrollStore config applied (MinOS=$MIN_IOS)"
 
           # ══════════════════════════════════════
+          # Xóa permissions thừa từ WDA mặc định (post-build)
+          # WDA gốc có ~24 permissions, chỉ giữ 6 cái thiết yếu
+          # ══════════════════════════════════════
+          echo "=== Cleaning unnecessary permissions ==="
+          removed=0
+          for perm in \
+            NFCReaderUsageDescription \
+            NSAppleMusicUsageDescription \
+            NSBluetoothAlwaysUsageDescription \
+            NSBluetoothPeripheralUsageDescription \
+            NSCalendarsUsageDescription \
+            NSContactsUsageDescription \
+            NSFaceIDUsageDescription \
+            NSHealthClinicalHealthRecordsShareUsageDescription \
+            NSHealthShareUsageDescription \
+            NSHealthUpdateUsageDescription \
+            NSHomeKitUsageDescription \
+            NSLocationDefaultAccuracyReduced \
+            NSMotionUsageDescription \
+            NSRemindersUsageDescription \
+            NSSensorKitPrivacyPolicyURL \
+            NSSensorKitUsageDescription \
+            NSSensorKitUsageDetail \
+            NSSiriUsageDescription \
+            NSSpeechRecognitionUsageDescription \
+            NSUserTrackingUsageDescription \
+            NSVideoSubscriberAccountUsageDescription; do
+            if /usr/libexec/PlistBuddy -c "Delete :$perm" "$PLIST" 2>/dev/null; then
+              ((removed++)) || true
+            fi
+          done
+          echo "  ✅ Removed $removed unnecessary permissions (keeping 6 essential)"
+
+          # ══════════════════════════════════════
           # Dọn dẹp signatures cũ
           # ══════════════════════════════════════
           find Payload -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
