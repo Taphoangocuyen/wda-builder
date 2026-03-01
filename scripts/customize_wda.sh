@@ -51,11 +51,45 @@ echo "✅ Min iOS: $MIN_IOS"
 echo "✅ Background Mode: continuous"
 
 # ------------------------------------------
-# 5. PERMISSIONS THIẾT YẾU (6 cái)
+# 5. XÓA PERMISSIONS THỪA TỪ WDA MẶC ĐỊNH
 # ------------------------------------------
-# Chỉ thêm permissions WDA thực sự cần cho điều khiển iPhone.
-# Bỏ 18 permissions không liên quan (Health, HomeKit, NFC, Siri, FaceID...)
-# → Giảm prompt quyền trên iPhone, khởi động nhanh hơn.
+# WDA mặc định có ~24 permissions. Chỉ giữ 6 cái thực sự cần.
+# Xóa 18 permissions thừa → giảm popup quyền trên iPhone.
+REMOVE_PERMISSIONS=(
+    "NFCReaderUsageDescription"
+    "NSAppleMusicUsageDescription"
+    "NSBluetoothAlwaysUsageDescription"
+    "NSBluetoothPeripheralUsageDescription"
+    "NSCalendarsUsageDescription"
+    "NSContactsUsageDescription"
+    "NSFaceIDUsageDescription"
+    "NSHealthClinicalHealthRecordsShareUsageDescription"
+    "NSHealthShareUsageDescription"
+    "NSHealthUpdateUsageDescription"
+    "NSHomeKitUsageDescription"
+    "NSLocationDefaultAccuracyReduced"
+    "NSMotionUsageDescription"
+    "NSRemindersUsageDescription"
+    "NSSensorKitPrivacyPolicyURL"
+    "NSSensorKitUsageDescription"
+    "NSSensorKitUsageDetail"
+    "NSSiriUsageDescription"
+    "NSSpeechRecognitionUsageDescription"
+    "NSUserTrackingUsageDescription"
+    "NSVideoSubscriberAccountUsageDescription"
+)
+
+removed=0
+for perm in "${REMOVE_PERMISSIONS[@]}"; do
+    if /usr/libexec/PlistBuddy -c "Delete :$perm" "$RUNNER_PLIST" 2>/dev/null; then
+        ((removed++))
+    fi
+done
+echo "✅ Đã xóa $removed permissions thừa từ WDA mặc định"
+
+# ------------------------------------------
+# 6. THÊM PERMISSIONS THIẾT YẾU (6 cái)
+# ------------------------------------------
 PERMISSIONS=(
     "NSLocalNetworkUsageDescription"
     "NSCameraUsageDescription"
@@ -73,7 +107,7 @@ done
 echo "✅ Đã thêm ${#PERMISSIONS[@]} permissions thiết yếu"
 
 # ------------------------------------------
-# 6. CHO PHÉP HTTP (LOCAL NETWORK)
+# 7. CHO PHÉP HTTP (LOCAL NETWORK)
 # ------------------------------------------
 /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$RUNNER_PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$RUNNER_PLIST"
@@ -81,7 +115,7 @@ echo "✅ Đã thêm ${#PERMISSIONS[@]} permissions thiết yếu"
 echo "✅ NSAllowsArbitraryLoads: true"
 
 # ------------------------------------------
-# 7. BONJOUR SERVICES (iOS 14+ local network)
+# 8. BONJOUR SERVICES (iOS 14+ local network)
 # ------------------------------------------
 /usr/libexec/PlistBuddy -c "Delete :NSBonjourServices" "$RUNNER_PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :NSBonjourServices array" "$RUNNER_PLIST"
@@ -89,7 +123,7 @@ echo "✅ NSAllowsArbitraryLoads: true"
 echo "✅ NSBonjourServices: _http._tcp"
 
 # ------------------------------------------
-# 8. CÀI ĐẶT BỔ SUNG
+# 9. CÀI ĐẶT BỔ SUNG
 # ------------------------------------------
 # Cho phép full screen
 /usr/libexec/PlistBuddy -c "Set :UIRequiresFullScreen true" "$RUNNER_PLIST" 2>/dev/null || \

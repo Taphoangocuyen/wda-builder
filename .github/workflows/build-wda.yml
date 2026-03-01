@@ -11,6 +11,10 @@ on:
         description: 'App display name'
         required: false
         default: 'iPhone Control'
+      ipa_filename:
+        description: 'Output IPA filename (without .ipa)'
+        required: false
+        default: 'iPhoneControl'
       auth_key:
         description: 'IPC Auth Key (leave empty to use repository secret IPC_AUTH_KEY)'
         required: false
@@ -19,6 +23,10 @@ on:
         description: 'Minimum iOS version'
         required: false
         default: '15.0'
+      wda_version:
+        description: 'WDA version (tag, branch, or commit SHA). Leave empty for latest.'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -27,17 +35,49 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ════════════════════════════════════════════════════════
+      # Bước 0: Clone WDA với version pinning
+      # ════════════════════════════════════════════════════════
       - name: Clone WebDriverAgent source
         run: |
           git clone https://github.com/appium/WebDriverAgent.git
           cd WebDriverAgent
-          echo "WDA version: $(git describe --tags --always)"
-          echo "WDA commit: $(git rev-parse --short HEAD)"
+
+          WDA_VERSION="${{ github.event.inputs.wda_version }}"
+          if [ -n "$WDA_VERSION" ]; then
+            echo "📌 Checking out WDA version: $WDA_VERSION"
+            git checkout "$WDA_VERSION"
+          fi
+
+          WDA_TAG=$(git describe --tags --always 2>/dev/null || echo "unknown")
+          WDA_COMMIT=$(git rev-parse --short HEAD)
+          echo "WDA version: $WDA_TAG (commit: $WDA_COMMIT)"
+          echo "WDA_TAG=$WDA_TAG" >> $GITHUB_ENV
+          echo "WDA_COMMIT=$WDA_COMMIT" >> $GITHUB_ENV
 
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
+
+      # ════════════════════════════════════════════════════════
+      # Bước 0.5: Cache dependencies (ldid, xcodeproj)
+      # ════════════════════════════════════════════════════════
+      - name: Cache Homebrew ldid
+        id: cache-ldid
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/Cellar/ldid
+            /opt/homebrew/Cellar/ldid
+          key: ldid-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install ldid
+        if: steps.cache-ldid.outputs.cache-hit != 'true'
+        run: brew install ldid
+
+      - name: Ensure ldid is linked
+        run: brew link ldid 2>/dev/null || true
 
       # ════════════════════════════════════════════════════════
       # Bước 1: Customize WDA (permissions, MinimumOSVersion...)
@@ -133,9 +173,12 @@ jobs:
       # ════════════════════════════════════════════════════════
       - name: Package TrollStore-compatible IPA
         run: |
+          set -euo pipefail
+
           BUNDLE_ID="${{ github.event.inputs.bundle_id }}"
           DISPLAY_NAME="${{ github.event.inputs.display_name }}"
           MIN_IOS="${{ github.event.inputs.min_ios_version }}"
+          IPA_NAME="${{ github.event.inputs.ipa_filename }}"
 
           # ── Tìm .app đã build ──
           APP_PATH=$(find WebDriverAgent/build -name "WebDriverAgentRunner-Runner.app" -type d | head -1)
@@ -154,6 +197,15 @@ jobs:
           PLIST="$TARGET_APP/Info.plist"
 
           # ══════════════════════════════════════
+          # Strip Testing.framework (không cần, tiết kiệm ~5MB)
+          # ══════════════════════════════════════
+          if [ -d "$TARGET_APP/Frameworks/Testing.framework" ]; then
+            TESTING_SIZE=$(du -sh "$TARGET_APP/Frameworks/Testing.framework" | cut -f1)
+            rm -rf "$TARGET_APP/Frameworks/Testing.framework"
+            echo "✅ Đã xóa Testing.framework ($TESTING_SIZE) — WDA không sử dụng"
+          fi
+
+          # ══════════════════════════════════════
           # Custom App Icon (chỉ resize, KHÔNG copy gốc 1.1MB)
           # ══════════════════════════════════════
           if [ -f "resources/icon.png" ]; then
@@ -162,7 +214,6 @@ jobs:
             sips -z 180 180 resources/icon.png --out "$TARGET_APP/AppIcon60x60@3x.png" || true
             sips -z 152 152 resources/icon.png --out "$TARGET_APP/AppIcon76x76@2x.png" || true
             sips -z 167 167 resources/icon.png --out "$TARGET_APP/AppIcon83.5x83.5@2x.png" || true
-            # KHÔNG copy icon.png gốc (1.1MB) → tiết kiệm ~1MB
 
             /usr/libexec/PlistBuddy -c "Delete :CFBundleIcons" "$PLIST" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$PLIST"
@@ -225,7 +276,41 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :NSBonjourServices:0 string _http._tcp" "$PLIST"
 
           # ══════════════════════════════════════
-          # Essential permissions (6 cái)
+          # Xóa permissions thừa từ WDA mặc định (post-build)
+          # Giữ lại chỉ 6 permissions thiết yếu
+          # ══════════════════════════════════════
+          echo "=== Cleaning unnecessary permissions ==="
+          removed=0
+          for perm in \
+            NFCReaderUsageDescription \
+            NSAppleMusicUsageDescription \
+            NSBluetoothAlwaysUsageDescription \
+            NSBluetoothPeripheralUsageDescription \
+            NSCalendarsUsageDescription \
+            NSContactsUsageDescription \
+            NSFaceIDUsageDescription \
+            NSHealthClinicalHealthRecordsShareUsageDescription \
+            NSHealthShareUsageDescription \
+            NSHealthUpdateUsageDescription \
+            NSHomeKitUsageDescription \
+            NSLocationDefaultAccuracyReduced \
+            NSMotionUsageDescription \
+            NSRemindersUsageDescription \
+            NSSensorKitPrivacyPolicyURL \
+            NSSensorKitUsageDescription \
+            NSSensorKitUsageDetail \
+            NSSiriUsageDescription \
+            NSSpeechRecognitionUsageDescription \
+            NSUserTrackingUsageDescription \
+            NSVideoSubscriberAccountUsageDescription; do
+            if /usr/libexec/PlistBuddy -c "Delete :$perm" "$PLIST" 2>/dev/null; then
+              ((removed++))
+            fi
+          done
+          echo "  ✅ Đã xóa $removed permissions thừa từ IPA"
+
+          # ══════════════════════════════════════
+          # Thêm/đảm bảo 6 permissions thiết yếu
           # ══════════════════════════════════════
           PERM_TEXT="Required for device automation"
           for perm in \
@@ -238,7 +323,7 @@ jobs:
             /usr/libexec/PlistBuddy -c "Set :$perm '$PERM_TEXT'" "$PLIST" 2>/dev/null || \
             /usr/libexec/PlistBuddy -c "Add :$perm string '$PERM_TEXT'" "$PLIST"
           done
-          echo "  ✅ 6 essential permissions added"
+          echo "  ✅ 6 essential permissions ensured"
 
           echo "  ✅ TrollStore config applied (MinOS=$MIN_IOS)"
 
@@ -318,10 +403,9 @@ jobs:
 
           # ══════════════════════════════════════
           # Fakesign với ldid + TrollStore entitlements
+          # FIX: dùng process substitution thay vì pipe
+          # để ldid fail → workflow fail
           # ══════════════════════════════════════
-          echo "=== Installing ldid ==="
-          brew install ldid 2>/dev/null || true
-
           echo "=== Fakesigning binaries with TrollStore entitlements ==="
           ENTITLEMENTS="resources/entitlements.plist"
           if [ ! -f "$ENTITLEMENTS" ]; then
@@ -329,13 +413,15 @@ jobs:
             exit 1
           fi
 
-          SIGN_FAILED=0
-          find Payload -type f | while read f; do
+          SIGN_COUNT=0
+          while IFS= read -r -d '' f; do
             if file "$f" | grep -q "Mach-O"; then
-              echo "  Signing: $(basename $f)"
+              echo "  Signing: $(basename "$f")"
               ldid -S"$ENTITLEMENTS" "$f" || { echo "FATAL: ldid failed on $f"; exit 1; }
+              ((SIGN_COUNT++))
             fi
-          done
+          done < <(find Payload -type f -print0)
+          echo "  ✅ Signed $SIGN_COUNT Mach-O binaries"
 
           # ══════════════════════════════════════
           # Auth status log
@@ -353,10 +439,59 @@ jobs:
           # ══════════════════════════════════════
           # Tạo IPA
           # ══════════════════════════════════════
-          zip -r "iPhoneControl.ipa" Payload/
+          zip -r "${IPA_NAME}.ipa" Payload/
           echo ""
           echo "=== ✅ IPA created ==="
-          ls -lh iPhoneControl.ipa
+          ls -lh "${IPA_NAME}.ipa"
+
+          # Lưu tên IPA cho step sau
+          echo "IPA_NAME=$IPA_NAME" >> $GITHUB_ENV
+
+      # ════════════════════════════════════════════════════════
+      # Bước 6: Kiểm tra IPA hợp lệ
+      # ════════════════════════════════════════════════════════
+      - name: Verify IPA
+        run: |
+          IPA_NAME="${{ github.event.inputs.ipa_filename }}"
+          echo "=== Verifying ${IPA_NAME}.ipa ==="
+
+          # Kiểm tra file tồn tại và kích thước hợp lý
+          IPA_SIZE=$(stat -f%z "${IPA_NAME}.ipa" 2>/dev/null || stat --format=%s "${IPA_NAME}.ipa")
+          IPA_SIZE_MB=$(echo "scale=1; $IPA_SIZE / 1048576" | bc)
+          echo "  Kích thước: ${IPA_SIZE_MB} MB"
+
+          if [ "$IPA_SIZE" -lt 1000000 ]; then
+            echo "ERROR: IPA quá nhỏ ($IPA_SIZE bytes) — có thể build lỗi!"
+            exit 1
+          fi
+
+          # Kiểm tra cấu trúc IPA
+          unzip -t "${IPA_NAME}.ipa" > /dev/null 2>&1 || { echo "ERROR: IPA zip bị hỏng!"; exit 1; }
+
+          # Kiểm tra binary chính tồn tại
+          unzip -l "${IPA_NAME}.ipa" | grep -q "WebDriverAgentRunner-Runner$" || {
+            echo "ERROR: Binary chính không tìm thấy trong IPA!"
+            exit 1
+          }
+
+          # Kiểm tra WebDriverAgentLib
+          unzip -l "${IPA_NAME}.ipa" | grep -q "WebDriverAgentLib" || {
+            echo "ERROR: WebDriverAgentLib không tìm thấy!"
+            exit 1
+          }
+
+          # Log build info
+          echo ""
+          echo "╔══════════════════════════════════════╗"
+          echo "║     BUILD SUMMARY                    ║"
+          echo "╠══════════════════════════════════════╣"
+          echo "  IPA: ${IPA_NAME}.ipa (${IPA_SIZE_MB} MB)"
+          echo "  Display Name: ${{ github.event.inputs.display_name }}"
+          echo "  Bundle ID: ${{ github.event.inputs.bundle_id }}"
+          echo "  Min iOS: ${{ github.event.inputs.min_ios_version }}"
+          echo "  WDA: ${{ env.WDA_TAG }} (${{ env.WDA_COMMIT }})"
+          echo "  Auth: ${{ env.AUTH_ENABLED }}"
+          echo "╚══════════════════════════════════════╝"
 
       # ════════════════════════════════════════════════════════
       # Upload artifact
@@ -364,6 +499,6 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: iPhoneControl-IPA
-          path: iPhoneControl.ipa
+          name: ${{ github.event.inputs.ipa_filename }}-IPA
+          path: ${{ github.event.inputs.ipa_filename }}.ipa
           retention-days: 90
