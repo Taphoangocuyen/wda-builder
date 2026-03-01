@@ -364,24 +364,28 @@ jobs:
           find Payload -name "*.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ══════════════════════════════════════
-          # Patch MH_BUNDLE → MH_DYLIB (Frameworks ONLY)
+          # Thin FAT binaries → arm64 only
+          # Tránh lỗi signing/loading khi FAT có arm64+arm64e
+          # ══════════════════════════════════════
+          echo "=== Thinning FAT binaries to arm64 ==="
+          THIN_COUNT=0
+          while IFS= read -r -d '' f; do
+            if file "$f" | grep -q "universal binary"; then
+              lipo "$f" -thin arm64 -output "$f.thin" 2>/dev/null && mv "$f.thin" "$f" && {
+                echo "  Thinned: $(basename "$f")"
+                ((THIN_COUNT++))
+              }
+            fi
+          done < <(find Payload -type f -print0)
+          echo "  ✅ Thinned $THIN_COUNT FAT binaries to arm64"
+
+          # ══════════════════════════════════════
+          # Patch MH_BUNDLE → MH_DYLIB (CHỈ trong Frameworks/)
+          # KHÔNG patch PlugIns/*.xctest (NSBundle cần MH_BUNDLE!)
           # ══════════════════════════════════════
           echo "=== Patching Mach-O binaries (Frameworks only) ==="
           python3 << 'PYEOF'
           import struct, os
-
-          def get_macho_info(filepath):
-              try:
-                  with open(filepath, 'rb') as f:
-                      data = f.read(32)
-                  if len(data) < 16:
-                      return None
-                  magic = struct.unpack_from('<I', data, 0)[0]
-                  if magic in (0xfeedfacf, 0xfeedface, 0xbebafeca, 0xcafebabe):
-                      return magic
-                  return None
-              except:
-                  return None
 
           def patch_bundle_to_dylib(filepath):
               with open(filepath, 'rb') as f:
@@ -393,48 +397,37 @@ jobs:
 
               if magic in (0xfeedfacf, 0xfeedface):
                   ft = struct.unpack_from('<I', data, 12)[0]
-                  if ft == 8:
-                      struct.pack_into('<I', data, 12, 6)
+                  if ft == 8:  # MH_BUNDLE
+                      struct.pack_into('<I', data, 12, 6)  # → MH_DYLIB
                       patched = True
                       print(f"  [{fname}] PATCHED: MH_BUNDLE -> MH_DYLIB")
-
+                  else:
+                      print(f"  [{fname}] OK (type={ft})")
               elif magic in (0xbebafeca, 0xcafebabe):
-                  nfat = struct.unpack_from('>I', data, 4)[0]
-                  for i in range(nfat):
-                      entry_offset = 8 + i * 20
-                      slice_offset = struct.unpack_from('>I', data, entry_offset + 8)[0]
-                      slice_magic = struct.unpack_from('<I', data, slice_offset)[0]
-                      if slice_magic in (0xfeedfacf, 0xfeedface):
-                          ft = struct.unpack_from('<I', data, slice_offset + 12)[0]
-                          if ft == 8:
-                              struct.pack_into('<I', data, slice_offset + 12, 6)
-                              patched = True
-                              print(f"  [{fname}] Slice {i} PATCHED")
+                  print(f"  [{fname}] SKIP: still FAT (should have been thinned)")
 
               if patched:
                   with open(filepath, 'wb') as f:
                       f.write(data)
               return patched
 
-          # Patch tất cả MH_BUNDLE → MH_DYLIB (Frameworks + PlugIns xctest)
-          # KHÔNG patch main executable (đã là MH_EXECUTE)
-          main_exe = os.path.join("Payload", "WebDriverAgentRunner-Runner.app", "WebDriverAgentRunner-Runner")
-          main_exe_real = os.path.realpath(main_exe) if os.path.exists(main_exe) else ""
-
+          # CHỈ patch trong Frameworks/ — KHÔNG patch PlugIns/xctest
           total_patched = 0
           for root, dirs, files in os.walk("Payload"):
               for fname in files:
                   fpath = os.path.join(root, fname)
-                  # Bỏ qua main executable
-                  if os.path.realpath(fpath) == main_exe_real:
+                  if "/Frameworks/" not in fpath.replace("\\", "/"):
                       continue
-                  # Bỏ qua non-binary files (plist, png, etc)
-                  magic = get_macho_info(fpath)
-                  if magic is not None:
-                      if patch_bundle_to_dylib(fpath):
-                          total_patched += 1
+                  try:
+                      with open(fpath, 'rb') as f:
+                          magic = struct.unpack_from('<I', f.read(4), 0)[0]
+                      if magic in (0xfeedfacf, 0xfeedface):
+                          if patch_bundle_to_dylib(fpath):
+                              total_patched += 1
+                  except:
+                      pass
 
-          print(f"\nTotal binaries patched: {total_patched}")
+          print(f"\nTotal patched: {total_patched}")
           PYEOF
 
           # ══════════════════════════════════════
