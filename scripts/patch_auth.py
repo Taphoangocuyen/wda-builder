@@ -28,23 +28,9 @@ def patch_file(filepath, auth_key, route_prefix):
     # No header check needed — prefix acts as secret token in URL
     replacement = target + '''
 
-    // ═══ IPC Route Guard (source patch) ═══
+    // ═══ IPC Route Guard — LOG ONLY (no blocking) ═══
     {
-      NSString *_ipcPrefix = @"/''' + route_prefix + '''/";
-      BOOL _ipcIsPublic = [path isEqualToString:@"/status"]
-                       || [path hasPrefix:@"/status?"]
-                       || [path isEqualToString:@"/health"]
-                       || [path hasPrefix:@"/health?"];
-      if (_ipcIsPublic) {
-        NSLog(@"[IPC] PASS (public): %@ %@", method, path);
-      } else if ([path hasPrefix:_ipcPrefix]) {
-        NSString *_origPath = path;
-        path = [path substringFromIndex:_ipcPrefix.length - 1];
-        NSLog(@"[IPC] PASS (prefix): %@ %@ -> %@", method, _origPath, path);
-      } else {
-        NSLog(@"[IPC] BLOCK: %@ %@", method, path);
-        path = @"/__ipc_blocked__";
-      }
+      NSLog(@"[IPC-DEBUG] %@ %@", method, path);
     }
     // ═══ End IPC Route Guard ═══'''
 
