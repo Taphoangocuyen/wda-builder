@@ -23,22 +23,28 @@ def patch_file(filepath, auth_key, route_prefix):
         print(f"ERROR: Could not find '{target}' in {filepath}")
         sys.exit(1)
 
-    # Inject route prefix check right after path = [url path];
-    # Only requests with correct prefix are allowed through
-    # No header check needed — prefix acts as secret token in URL
+    # Inject route prefix + auth header check after path = [url path];
+    # Both layers required: correct prefix AND correct X-IPC-Auth header
     replacement = target + '''
 
     // ═══ IPC Route Guard (source patch) ═══
     {
       NSString *_ipcPrefix = @"/''' + route_prefix + '''/";
+      NSString *_ipcKey = @"''' + auth_key + '''";
       BOOL _ipcIsPublic = [path isEqualToString:@"/status"]
                        || [path hasPrefix:@"/status?"]
                        || [path isEqualToString:@"/health"]
                        || [path hasPrefix:@"/health?"];
       if (_ipcIsPublic) {
-        // public — no log, no block
+        // public — no check needed
       } else if ([path hasPrefix:_ipcPrefix]) {
-        path = [path substringFromIndex:_ipcPrefix.length - 1];
+        // Check auth header
+        NSString *_authVal = [request headerField:@"X-IPC-Auth"];
+        if (_authVal && [_authVal isEqualToString:_ipcKey]) {
+          path = [path substringFromIndex:_ipcPrefix.length - 1];
+        } else {
+          path = @"/__ipc_blocked__";
+        }
       } else {
         path = @"/__ipc_blocked__";
       }
